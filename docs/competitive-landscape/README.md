@@ -5,6 +5,7 @@
 - [01 Hindsight 五方对比](01-hindsight-vs-competitors.md) — 核心引擎机制（Retain/Recall/Consolidation/Reflect）、五竞品架构对比表、基准数字与口径警告、GitHub 生态数据
 - [02 ContextDB 需求深拆与架构建议](02-contextdb-requirements-and-architecture.md) — 能力矩阵（R1–R7）、逐竞品按需求深拆、跨竞品缺口分析、自研蓝图（Fork Hindsight + RSI 闭环 + 权限内联 SQL）
 - [03 RSI 深度调研：沉淀之后数据会怎样](03-rsi-memory-evolution-deep-dive.md) — L0–L5 演化分级框架、六产品触发器/执行者/守护逐家核查（含两处评级修正）、学界自进化算法菜单（Generative Agents/A-MEM/AWM/ExpeL/Mem-α 等）、RSI 六环闭环的算法落位
+- [04 Hindsight vs Cognee 数据流对比](04-dataflow-hindsight-vs-cognee.md) — 代码级逐阶段走读（v0.10.1 vs v1.6.0）：摄入/巩固/查询/后台四条路径的调用链与 file:line 锚点、流水线式智能 vs 写入式智能的结构差异、两侧"值得抄"机制清单与反直觉发现
 
 ## 证据等级
 
