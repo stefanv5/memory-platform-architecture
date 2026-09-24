@@ -1,5 +1,7 @@
 # Hindsight vs Cognee 数据流深度对比（代码级）
 
+> 修订提示（2026-09-24）：后续逐函数复核发现，本文部分概括需要收窄或修正，包括 Cognee 自动 improve、增量更新、ID 和并发，以及 Hindsight 的事务范围、四路检索顺序、实体联系存储和存储扩展。请结合 [05 当前架构与实现对比](05-code-architecture-cognee-vs-hindsight.md) 阅读，以其第 7 节修订为准；本篇保留早期分析上下文。
+
 > 方法：双路子代理并行走读两个仓库的当前 HEAD（Hindsight v0.10.1 / Cognee tag `v1.6.0-3-g663a2dc15`），逐阶段记录入口函数、file:line、数据形态、同步/异步边界、失败重试行为。本文所有断言均可回溯到代码位置。
 > 规模：Hindsight 引擎 `hindsight_api/` ~156K 行（329 个 Python 文件，api-slim 测试 ~6,628 个）；Cognee 包 `cognee/` ~196K 行（2,443 个 .py 文件，~771 个测试文件）。
 > 姊妹文档：[01 五方对比](01-hindsight-vs-competitors.md)（宏观）· [03 RSI 调研](03-rsi-memory-evolution-deep-dive.md)（进化机制）——本文专注**数据怎么流**。
