@@ -316,6 +316,8 @@ WHERE source_id = ANY(:ids) OR target_id = ANY(:ids);
 
 **11.1. 华为云 PG 没有原生图接口，究竟靠什么拉通？**
 
+具体到表结构、缺失接口的返回契约、修改文件、并发与迁移问题，以及分档工作量，见[PG 图能力实现与改造计划](postgres-graph-implementation-plan.md)。
+
 这里的对接对象限定为**华为云 RDS for PostgreSQL**。该路线不要求 RDS 提供 Neo4j/Bolt、Cypher 或 Gremlin 服务。用的是标准 PostgreSQL 数据库连接：Cognee 自己的 Python 图接口由 `PostgresDemoAdapter` 实现，adapter 将具体操作写成 SQL，通过 SQLAlchemy + asyncpg 发到 RDS。它不是通用 Cypher→SQL 翻译器，也不是把图转换为向量后保存。
 
 ```mermaid

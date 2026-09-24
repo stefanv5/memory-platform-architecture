@@ -3,6 +3,7 @@
 本轮基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`；Hindsight `12f2d54f643baddacb98cd547c89b1a50c5c3dcc`。
 
 - [图存储、模块数据流与 PostgreSQL 替换分析](graph-storage-postgres-analysis.md)：图的模块用途、节点与关系模型、向量和图的交互、PG 适配机制、功能边界及华为云 RDS 兼容条件。
+- [PG 图能力的具体实现、改造清单与工作量](postgres-graph-implementation-plan.md)：节点/边/来源如何落表，反馈、truth、局部更新和时间检索的接口契约，生产化问题、华为云落地与分档人日估算。
 - [与 Hindsight 的当前架构及代码实现对比](../competitive-landscape/05-code-architecture-cognee-vs-hindsight.md)：接入、存储、检索、事务、后台演进、性能成本与扩展取舍；先独立介绍两边再比较。
 
 | 版本 | 内容 | 状态 |
