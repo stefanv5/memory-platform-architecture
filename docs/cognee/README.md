@@ -2,6 +2,8 @@
 
 本轮基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`；Hindsight `12f2d54f643baddacb98cd547c89b1a50c5c3dcc`。
 
+- [图存储、模块数据流与 PostgreSQL 替换分析](graph-storage-postgres-analysis.md)：图的模块用途、节点与关系模型、向量和图的交互、PG 适配机制、功能边界及华为云 RDS 兼容条件。
+
 | 版本 | 内容 | 状态 |
 |---|---|---|
 | [V6](v6-cluster-serverless/architecture.md) | 多租户共享计算、远程存储、临时写所有权、集群与 Serverless | 最新运行架构；修订默认部署路线 |
