@@ -313,3 +313,35 @@ WHERE source_id = ANY(:ids) OR target_id = ANY(:ids);
 替换已有系统还需要数据迁移。改 provider 只改变目标 adapter，不会自动搬运旧图或改完已有 dataset 的注册配置。当前有 COGX 导出/导入，可将图导出后在目标后端恢复，并核验向量索引、dataset 权限和来源。见 [export.py](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/migration/export.py#L237)、[cogx_archive.py](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/migration/sources/cogx_archive.py#L22)。它不是整个数据库物理备份，本次未执行跨后端迁移。
 
 建议将验收按实际模块列出：默认 HYBRID 问答、GRAPH 三元组、文档删除与共享事实、代码图、时间检索、反馈学习分别验证。华为云 PG 可以承载基础图模型；是否够用最终取决于业务会调用哪些 Cognee 模块，而不是只检查能否连上 PostgreSQL。
+
+**11.1. 华为云 PG 没有原生图接口，究竟靠什么拉通？**
+
+这里的对接对象限定为**华为云 RDS for PostgreSQL**。该路线不要求 RDS 提供 Neo4j/Bolt、Cypher 或 Gremlin 服务。用的是标准 PostgreSQL 数据库连接：Cognee 自己的 Python 图接口由 `PostgresDemoAdapter` 实现，adapter 将具体操作写成 SQL，通过 SQLAlchemy + asyncpg 发到 RDS。它不是通用 Cypher→SQL 翻译器，也不是把图转换为向量后保存。
+
+```mermaid
+flowchart TB
+    C[Cognee 任务与检索器] --> G[GraphDBInterface 方法调用]
+    G --> A[PostgresDemoAdapter: 图操作实现为 SQL]
+    C --> V[PGVectorAdapter: 向量相似度 SQL]
+    A --> D[SQLAlchemy + asyncpg]
+    V --> D
+    D --> P[PostgreSQL 数据库连接 / 可配置 TLS]
+    P --> R[华为云 RDS for PostgreSQL]
+    R --> T[graph_node / graph_edge / graph_metadata 普通表]
+    R --> E[vector 列与 pgvector 算子]
+```
+
+这里有两种“接口”，不能混为一谈：
+
+| 层次 | 接口/协议 | 由谁实现 |
+|---|---|---|
+| Cognee 应用内部 | `add_nodes`、`add_edges`、`get_neighborhood` 等 Python 方法 | `GraphDBInterface` 定义，PG adapter 实现 |
+| 数据库网络连接 | PostgreSQL 协议，发送 SQL、返回结果 | asyncpg 客户端与华为云 RDS PG 服务端 |
+
+例如“李工负责支付服务”分别存成两个 `graph_node` 行及一条 `graph_edge` 行。查李工邻域，adapter 对边表按 `source_id/target_id` 查相邻端点，再取节点属性；查多跳，则由 Python 维护 BFS frontier，逐跳执行 SQL。数据库看到的是表、索引、JOIN、事务和数组条件，而不是一个图查询协议。[节点/边表定义](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/tables.py#L28)、[数据库连接](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L218)、[邻域 BFS 与 SQL](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L907)。
+
+向量是另一条调用链：`PGVectorAdapter` 生成 embedding 的余弦距离查询；RDS 在安装 pgvector 后执行对应算子。图表与向量表可以放在同一实例，但它们承担不同检索职责；只配置 PGVector 不会满足 Cognee 图接口。[PGVector 搜索](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/vector/pgvector/PGVectorAdapter.py#L633)。
+
+华为云官方提供[标准 PostgreSQL 客户端与 SSL 连接说明](https://support.huaweicloud.com/qs-rds-pg/rds_02_0016.html)，以及[pgvector 类型、算子与版本检查方法](https://support.huaweicloud.com/usermanual-rds-pg/rds_09_0062.html)。这是连接与向量能力的依据，**不等于华为云认证了 Cognee 图 adapter 的全部功能与性能**。
+
+据此可得：已有适配器能把它已实现的图操作接到普通 PG，无需华为专用图协议或 AGE；但缺失的 Cypher、反馈权重、truth state 等接口不会因为 PG 连接成功而出现。开源 adapter 仍被[Cognee 官方](https://docs.cognee.ai/setup-configuration/graph-stores)标为 demo；实际实例还需验证网络/TLS、表和 schema 权限、vector 扩展、SQL行为及性能。本报告没有连接真实华为云实例，结论是**代码和协议层面的对接路径成立，功能完整性与生产验收另计**。
