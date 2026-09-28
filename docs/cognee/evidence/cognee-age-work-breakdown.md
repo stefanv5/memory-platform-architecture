@@ -97,7 +97,7 @@ Neo4j graph_exists/project_entire_graph/drop_graph/get_node_labels/get_relations
 
 ## 六、全Agent交付的范围与预算入口
 
-本文方法清单与W1～W7归属保留，原人工人日估算撤下。项目采用Agent完成实现、局部测试、独立评审、端到端验证、修复及文档，详见[主报告第4部分](../apache-age-compatibility-matrix.md)。
+本文方法清单与W1～W7归属保留，原人工人日估算撤下。项目采用Agent完成实现、局部测试、独立评审、端到端验证、修复及文档，详见[统一报告第11节](../graph-storage-postgres-analysis.md#agent-cost)。
 
 基准为1协调/集成＋2实现＋1独立验证/评审Agent，最多4并发。基础范围初始预算3～6自然日、80～170 Agent占用小时；是按依赖和返工余量安排的未校准预算，不是传统人日除以提速倍数。W1真实执行后须以Agent占用、工具/数据库等待、token和返工记录重估。
 

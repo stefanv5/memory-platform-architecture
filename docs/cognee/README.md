@@ -1,12 +1,10 @@
 # Cognee 商业化架构研究
 
+图存储分析已合并为下列单篇报告，原四篇拆分报告由 Git 历史保留。其他架构演进与 Hindsight 对比是独立主题。
+
 本轮基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`；Hindsight `12f2d54f643baddacb98cd547c89b1a50c5c3dcc`。
 
-- [初学者先读：用两份项目文档拆解APOC、GDS与AGE替代](apache-age-apoc-gds-walkthrough.md)：从张三重复入图、集合合并和关系写入，到计算副本、连通分量、最短距离和聚类系数，逐个解释3种APOC与7种GDS；包含图示和输入/输出。
-- [Apache AGE 兼容矩阵与逐项改造（最新）](apache-age-compatibility-matrix.md)：按 AGE＋PG 发布包列明功能与缺口；详解UUID/业务边唯一性、3种APOC和7种GDS调用缺失后的具体后果、替代成本与工时归属；盘点47个图接口，按全Agent开发列出并行依赖、Agent小时及3～6自然日的初始基础交付预算。
-- [图存储、模块数据流与 PostgreSQL 替换分析](graph-storage-postgres-analysis.md)：图的模块用途、节点与关系模型、向量和图的交互、PG 适配机制、功能边界及华为云 RDS 兼容条件。
-- [PG 图能力的具体实现、改造清单与工作量](postgres-graph-implementation-plan.md)：节点/边/来源如何落表，反馈、truth、局部更新和时间检索的接口契约，生产化问题、华为云落地与工作范围；历史人工估算不适用于本项目当前Agent交付方式。
-- [Apache AGE 真实执行机制与性能背景](apache-age-feasibility-analysis.md)：固定跳 JOIN、VLE 缓存、图存储机制与验证方案；完整版本兼容和工时结论以最新矩阵为准。
+- [Cognee图数据库统一报告：PG/AGE版本缺口、业务用例、Ladybug与100用户、非GPL候选及全Agent成本](graph-storage-postgres-analysis.md)
 - [与 Hindsight 的当前架构及代码实现对比](../competitive-landscape/05-code-architecture-cognee-vs-hindsight.md)：接入、存储、检索、事务、后台演进、性能成本与扩展取舍；先独立介绍两边再比较。
 
 | 版本 | 内容 | 状态 |
