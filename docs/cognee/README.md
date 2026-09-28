@@ -2,9 +2,10 @@
 
 本轮基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`；Hindsight `12f2d54f643baddacb98cd547c89b1a50c5c3dcc`。
 
+- [Apache AGE 兼容矩阵与逐项改造（最新）](apache-age-compatibility-matrix.md)：按 AGE＋PG 发布包列明功能与缺口、华为云主版本和扩展条件，完整盘点47个图接口及接口外调用，给出32～53人日的明确适配范围和选配工作。
 - [图存储、模块数据流与 PostgreSQL 替换分析](graph-storage-postgres-analysis.md)：图的模块用途、节点与关系模型、向量和图的交互、PG 适配机制、功能边界及华为云 RDS 兼容条件。
 - [PG 图能力的具体实现、改造清单与工作量](postgres-graph-implementation-plan.md)：节点/边/来源如何落表，反馈、truth、局部更新和时间检索的接口契约，生产化问题、华为云落地与分档人日估算。
-- [Apache AGE 可行性、版本与真实执行机制](apache-age-feasibility-analysis.md)：核验 PG14～18 对应 AGE 正式版本，区分固定跳 JOIN 与 VLE 缓存，逐项映射 Cognee 接口，并明确华为云 RDS 安装边界和验证方案。
+- [Apache AGE 真实执行机制与性能背景](apache-age-feasibility-analysis.md)：固定跳 JOIN、VLE 缓存、图存储机制与验证方案；完整版本兼容和工时结论以最新矩阵为准。
 - [与 Hindsight 的当前架构及代码实现对比](../competitive-landscape/05-code-architecture-cognee-vs-hindsight.md)：接入、存储、检索、事务、后台演进、性能成本与扩展取舍；先独立介绍两边再比较。
 
 | 版本 | 内容 | 状态 |

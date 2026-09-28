@@ -1,5 +1,7 @@
 # Cognee 接入 Apache AGE：版本、真实图能力、执行机制与华为云边界
 
+> **兼容和工作量结论已由[逐版本兼容矩阵](apache-age-compatibility-matrix.md)更新。**新报告补读 AGE1.6 的 PG14～17 及 AGE1.7 的 PG18 源码，列出真实缺口、47个Cognee接口和接口外需求；完整业务范围估算改为32～53人日。本文保留执行机制背景，下文28～47人日为已被替代的旧范围。没有版本被认定为已完整适配Cognee。
+
 核验日期：2026-09-28。本文重新评估“用 AGE 替代手写 SQL 图实现”，承接[普通 PG 实现与工作量](postgres-graph-implementation-plan.md)，不将数据可表达性当作性能结论。
 
 源码固定基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`；AGE PG17/1.7.0 `e1467f12e0b1d15dd35d3ab93f057a7112d425b8`；AGE PG18/1.8.0 `e43dc1a12b78fba4acef9835b2b10379b8d243b4`。
