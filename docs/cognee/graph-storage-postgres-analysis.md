@@ -1,1524 +1,603 @@
-# Cognee 图数据库选型：PG、Apache AGE、Ladybug 与 100 用户部署
+# Cognee能否改用Apache AGE（A Graph Extension，图扩展）：能力、缺口、影响与开发成本
 
-核验日期：2026-09-28。Cognee 固定源码 `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`。本篇合并此前五份图存储报告，版本、缺口、示例、实施范围和 Agent 成本均在正文；原稿由 Git 历史保留。
+核验日期：2026-09-28。本文以PostgreSQL（下文简称 **PG**，关系数据库）及其Apache AGE扩展为主线。数据库适配器（adapter）是把Cognee的读写要求转换成具体数据库操作的一层代码。
 
-阅读顺序是：先理解一份文档怎样进入 Cognee，再看普通 PG 缺什么、AGE 能补什么，最后判断 Ladybug 与其他数据库是否更适合 100 用户。证据统一分三类：**源码事实**（已有实现、解析器、上游回归）、**建议设计**（仍须开发）、**运行证据**（实际执行的结果）。没有运行的数据库组合、并发规模和云实例，不能写成已经通过。
+**总判断：AGE具备承接Cognee图存储和主要图操作的基础能力，但当前不能直接切换。需要开发适配器，保住写入、检索、来源与学习状态的业务规则。统计功能可以分期；是否更快、能承载多少并发，必须实测。**
 
-本文由三个子 Agent 分别核查 AGE/Cognee 合同、Ladybug/100用户、其他数据库/许可证，主 Agent 复核云厂商资料、交叉检查并合并。单靠静态代码不能证明生产吞吐或 Agent 开发速度，相关数字均明确限定为预算或测试场景。
+本文由多个Agent分工审查开源代码，再交叉复核。Cognee固定提交为`663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`；AGE固定版本见第2章和文末证据。所有“怎么改”均为待实施方案，**没有把源码可行性写成已完成的生产验证**。详细旧稿保留在Git历史，本文件是统一阅读入口。
+
+阅读顺序：[1 替代结论](#overview) → [2 版本与部署](#age-versions) → [3 写入缺口](#age-gaps) → [4 检索与学习](#retrieval-learning) → [5 统计影响](#gds-triggers) → [6 实施与成本](#age-adapter)。[备选图库](#ladybug)和[接口清单](#interface-inventory)放在文末，按需查看。
 
 <a id="overview"></a>
-## 1. 先说清楚选型结论
+## 1. 能替代什么：替换图后端，保留Cognee的记忆流程
 
-| 问题 | 能够据证据作出的结论 |
-|---|---|
-| 纯 PG 必须再装图数据库才能存 Cognee 图吗？ | 不必须。已有 demo adapter 用普通节点/边表实现部分图合同；但它的缺失接口与性能边界客观存在，不能作为完整生产替换承诺。 |
-| 哪个 AGE 版本开箱即用支持整个 Cognee？ | 本次核查的版本中没有，首先缺少Cognee AGE adapter。没有APOC/GDS同名库并非所有功能同等受阻：写入行为必须替代，GDS统计按场景分期，详见第6章。 |
-| APOC和GDS缺失是同一优先级吗？ | **不是。**APOC三项对应正常入图的必需行为；GDS七项在统计路径。摘要准确计数、WCC结构分析、可选全图路径/聚类分别验收，普通Claude Code会话不因缺GDS本身失败。 |
-| AGE 是否值得二次开发？ | 固定 PG18＋AGE1.8 有核心原语支持，适配方案可进入验证；它不是保证消除 JOIN 或保证提速的方案。主要开发发生在 Cognee 适配层，未发现本范围必须改 AGE 内核的证据。 |
-| 华为云 RDS 能直接用 AGE 吗？ | 已公开提供相应 PG 主版本，插件清单未列 AGE。客户端适配不能补出服务器缺少的扩展。可另部署图服务，或用 ECS/容器自管 PG＋AGE。 |
-| 不用 AGE，可以用 Ladybug 吗？ | **能承担已有图业务；不能直接满足同图跨机多writer/自动HA。** 独立dataset可保留并按owner分片；单热点图要求分布式或HA时进入服务型替代选型。具体决策、两条改造路线与替代方案分列于第9章。 |
-| 100 用户能否共用一个 Cognee？ | 用户数量本身不构成禁止条件。关键是共享还是私有 dataset、同时读写量、进程/文件归属和资源预算；没有“100用户必失败”或“已经支持100并发”的实测结论。 |
-| 是否存在友好非 GPL 候选？ | 有，后文固定版本核查 MIT/Apache-2.0 的 Ladybug、AGE、ArcadeDB、HugeGraph、JanusGraph、NebulaGraph；许可证通过不代表 Cognee 合同或多租户自动通过。 |
+**本章结论：可以把AGE作为待开发的图后端；不能只改连接地址，也不需要重写整个Cognee。真正要替代的是一组业务操作，不是Neo4j的所有扩展库。**
 
-可直接定位：[当前架构](#architecture) · [普通PG缺口](#plain-pg) · [AGE版本与华为云](#age-versions) · [每项缺口的业务后果](#age-gaps) · [APOC/GDS十项例子](#apoc-gds) · [缺失影响与优先级](#dependency-impact) · [GDS触发条件](#gds-triggers) · [AGE执行机制](#age-performance) · [适配方案](#age-adapter) · [Ladybug与100用户](#ladybug) · [其他开源选项](#alternatives) · [全Agent成本](#agent-cost) · [验收与决策](#acceptance)。
+### 1.1 先用一张表作出能力判断
+
+| 你关心的能力 | AGE底层是否有基础 | 当前还缺什么 | 明确结论 |
+|---|---|---|---|
+| 保存文档、片段、实体、关系 | 有节点、边、属性和读写语句 | Cognee对象到AGE的映射、批量写入和返回格式 | **可开发替代，当前未接通** |
+| 按实体找邻居、沿关系取上下文 | 有匹配和路径查询 | 跳数、方向、过滤、孤立节点、结果格式的适配 | **可开发替代，须对照结果验收** |
+| 重复导入、删除某份资料、失败恢复 | 有事务和属性读写基础 | 业务唯一性、来源维护、并发规则与补偿 | **必须开发，不能靠“有节点/边”省略** |
+| 反馈学习、事实有效期、时间检索 | 数据可表达，基础读写可用 | 相应接口及状态更新规则 | **可开发替代，不会自动支持** |
+| 节点/边计数、连通性分析 | 可查询数据，也可用应用侧算法 | 统计实现及失败状态；当前计数与结构统计耦合 | **按展示功能分期，不是会话统一阻断项** |
+| 全图距离、聚类统计 | 可另做算法，但有计算成本 | 完整口径、资源预算和规模验证 | **选配，不要求先实现才能问答** |
+| 原样运行任意Neo4j查询/扩展 | 方言和过程库不完全相同 | 查询改写、能力限制或额外开发 | **不能承诺原样兼容** |
+| 比普通PG更快、100用户达标 | 静态代码无法证明 | 真实数据、并发、硬件和响应目标的测试 | **未验证，不能作为既成优势** |
+
+AGE的节点、边、属性和查询原语见[版本能力证据][age16-evidence]及[新版证据][age18-evidence]；Cognee的业务要求定义在[图接口][graph-interface]。表中“可开发”不等于已有可用AGE适配器。
 
 <a id="architecture"></a>
-## 2. 先看 Cognee 当前架构：图不是一个独立的“文档依赖模块”
+### 1.2 AGE在系统里替换哪一块
 
-Cognee 的普通文档路径组织的是知识图；代码仓库路径才更直接包含 calls/imports 等依赖关系。图数据库不负责读懂自然语言，LLM 与模型转换先把文本变成结构化节点和边，adapter 再保存这些结构。[官方架构](https://docs.cognee.ai/core-concepts/architecture)描述关系、向量和图三个职责；具体实现以固定提交为准。
-
-| 存储职责 | 保存什么 | 在一次提问中解决什么问题 |
-|---|---|---|
-| 原文件/对象存储 | 上传文件、原文位置 | 原始内容从哪里读取 |
-| 关系库，SQLite或PG | 用户、dataset、ACL、Data、运行记录、部分来源登记 | 当前用户能访问哪些数据、任务执行到哪里 |
-| 向量库，LanceDB或PGVector等 | chunk/实体/摘要/关系文本的embedding与payload | 找到与问题语义相近的候选 |
-| 图库，默认Ladybug | 文档、chunk、实体、类型、关系、来源与学习状态 | 把候选与关联事实、原文来源连起来 |
-| 会话存储 | Q&A、trace、反馈与session context | 当前会话记忆；并非每条消息立即写永久图 |
-
-例如用户输入“张三和李四参与星河项目”。这不是只保存一句话或一个向量。抽取后可能形成下图；业务关系名是教学示例，实际由抽取模型与本体决定。
+以“张三参与星河项目”为例，大语言模型负责抽取实体和关系；数据库保存抽取后的结构。图不是只保存原文，也不是替模型理解语言。
 
 ```mermaid
 flowchart LR
-  S[TextSummary 摘要] -->|made_from| C[DocumentChunk 原文块]
-  C -->|is_part_of| D[TextDocument 项目纪要]
-  C -->|contains| Z[Entity 张三]
-  C -->|contains| X[Entity 星河项目]
-  Z -->|is_a| T[EntityType 人物]
-  Z -->|参与| X
+    D[项目资料或待持久化的会话] --> C[Cognee解析、切块、抽取]
+    C --> R[关系库：用户、权限、任务记录]
+    C --> V[向量库：语义检索索引]
+    C --> A[图适配器：本次需要开发]
+    A --> G[PG加AGE：节点、边、来源、学习状态]
+    Q[用户提问] --> V
+    V --> N[取得候选实体]
+    N --> A
+    G --> X[相关关系与来源上下文]
+    X --> L[模型生成回答]
 ```
 
-`Entity` 是模型类型，“人物”是 `is_a` 指向的语义类型。`belongs_to_set` 是同一图内部的内容分组，不能替代 dataset 权限隔离。模型依据：[DocumentChunk](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/chunking/models/DocumentChunk.py#L32)、[Entity](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/engine/models/Entity.py#L5)、[Summary](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/summarization/models.py#L22)。
+图与向量通常通过通用唯一标识（**UUID**，用于稳定识别同一业务对象）关联。例如向量命中“张三”的UUID，图再用这个标识查他的项目关系。AGE自己的内部节点编号不能直接替代这个业务UUID。[模型转图][model-to-graph]、[节点索引][node-index]、[官方架构][cognee-architecture]。
 
-### 2.1 输入、存储和检索如何连接
-
-永久记忆路径是 `remember → add → cognify → 抽取/切块/摘要 → add_data_points`。`get_graph_from_model` 递归展开 DataPoint：普通值变属性，对象引用变边，列表引用变多条边。`remember(session_id=...)` 还可能先使用会话缓存，因此不能把所有 remember 调用都解释成即时永久入图。[模型转换](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/graph/utils/get_graph_from_model.py#L87)、[存储编排](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/add_data_points.py#L250)、[remember](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/api/v1/remember/remember.py#L1801)。
-
-节点通常通过同一个业务 UUID 关联图与向量。例：向量召回得到“星河”的 UUID，再用这个 ID 查图里的参与者。关系文本索引是例外：同名关系文本可以共享一条向量记录；它的 ID 不能当作具体边的 `edge_object_id`。[节点索引](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/index_data_points.py#L53)、[边文本索引](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/index_graph_edges.py#L39)。
-
-```mermaid
-sequenceDiagram
- participant U as 用户
- participant R as HybridRetriever
- participant V as 向量adapter
- participant G as 图adapter
- participant L as LLM
- U->>R: 星河项目有哪些参与者？
- R->>V: 原文、摘要、实体、关系文本召回
- V-->>R: 候选内容、业务ID、距离
- R->>G: get_neighborhood(实体IDs, depth=1)
- G-->>R: 节点与有向关系
- R->>R: 排序并组装来源与关系上下文
- R->>L: 上下文与问题
- L-->>U: 回答
-```
-
-这条默认 HYBRID 路径的一跳扩展在 [hybrid/entities.py](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/hybrid/entities.py#L43)。其他 GRAPH_COMPLETION 路径还会使用筛选子图、三元组与应用层排序，不能把所有检索简化成一跳。邻域读取出错可能降级为没有关系的实体上下文，因此“仍能回答”不能证明图检索成功；应检查实际上下文和日志。
-
-### 2.2 为什么后端可以换，但不能只换连接串
-
-上层调用的是 `GraphDBInterface` 的 Python 方法；节点返回 `(id, properties)`，边返回 `(source_id, target_id, relationship_name, properties)`。业务知识已结构化，所以新 adapter 不需要重写文档抽取与 LLM，只需正确实现这些方法及状态合同。[公共接口](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/graph_db_interface.py#L16)。
-
-但接口不仅要求“能读一条边”。文档 A、B 同时支持“张三参与星河”，撤回 A 应只去掉 A 的来源；若直接删张三节点，B 的知识也丢了。来源删除规划、run 回滚、反馈、事实有效期和租户生命周期都属于后端必须保持的语义。[来源删除规划](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/unified/provenance_delete_planner.py#L90)。
-
-图写入、节点向量索引、边写入、关系向量索引等分阶段进行。某批边写失败时，此前节点和节点向量可能已存在；PG图和PGVector放同一服务器也不自动变成一个事务。适配方案必须保留补偿与重试，不把“同库”写成“全流程原子”。
-
-代码依赖图另走 `tasks/code_graph`：CodeRepository/CodeModule/CodeSymbol 等模型和 calls/imports 关系进入同一图协议；CodeRetriever 可先读取代码子图，再在应用层遍历与影响分析。该路径向量索引是可选，不能声称每种图检索都依赖向量或 GDS。[代码模型](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/code_graph/models.py#L29)、[代码检索](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/code_retriever.py#L857)。
-
+上层调用图适配器的应用编程接口（**API**，代码之间约定的调用方式）。例如调用`get_neighborhood`取得邻域，再整理成回答上下文。新适配器只要保持输入、输出和业务行为，就能复用上层抽取和回答流程。[默认邻域检索][hybrid-neighbors]。
 
 <a id="plain-pg"></a>
-## 3. 普通 PG：图怎么存，缺口究竟在数据库还是适配器
+### 1.3 为什么不直接继续用普通PG
 
-这里的“PG支持”必须分两层：PG能表达节点、关系和属性；当前开源 `postgres_demo` 是否实现调用方要用的方法。只配置 `DB_PROVIDER=postgres` 改的是关系库；只配置 PGVector 改的是向量库，二者都不会自动切换图后端。
+普通PG也能用两张表保存节点和边，现有`postgres_demo`适配器已经这样做；因此“PG没有图扩展就完全不能存图”不成立。问题在于接口缺口、图查询表达和实际执行成本。
 
-### 3.1 具体落表与网络协议
+AGE增加图模型和Cypher（描述节点、关系和路径的查询语言），适合把图操作集中在数据库侧表达。但它仍运行在PG之上，**不保证消除联表，也不保证比原方案更快**。第4章说明要测哪些成本。[普通PG适配器][pg-demo]。
 
-已有 PG 图 adapter 用 SQLAlchemy＋asyncpg 发送普通 SQL；华为云 RDS 接收标准 PG 协议。内部 `get_neighborhood` 是 Python 图接口，外部网络协议仍是 PostgreSQL。没有隐藏的 Cypher→SQL万能网关，也没有把边转换成向量来代替图。
-
-
-以示意 ID（实际为 UUID）说明 PG 的物理映射：
-
-| 表 | 示例行 |
-|---|---|
-| graph_node | id=A，name=张三，type=Entity，properties={description: ...} |
-| graph_node | id=P，name=项目X，type=Entity，properties={...} |
-| graph_node | id=T，name=person，type=EntityType，properties={...} |
-| graph_edge | source_id=A，target_id=P，relationship_name=responsible_for |
-| graph_edge | source_id=A，target_id=T，relationship_name=is_a |
-
-[PG 表定义](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/tables.py#L27)保留方向、类型和属性；源/目标列是外键，边身份是三列复合主键。节点写入用 ON CONFLICT 按 ID 更新，边按其复合身份更新。
-
-实体向量命中 P 后，PG adapter 的一跳边查询为：
-
-```sql
-SELECT source_id, target_id, relationship_name, properties
-FROM graph_edge
-WHERE source_id = ANY(:ids) OR target_id = ANY(:ids);
-```
-
-这里 :ids 是 SQLAlchemy 绑定参数，值为命中的节点 ID 集合。再收集返回边的端点，按 ID 取 graph_node，组装上述 Node/EdgeData。证据：[adapter.py](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L663)。
-
-检索器收到的仍是“哪些节点通过哪些边连接”，后续排序和回答逻辑继续复用。多跳时 PG adapter 在 Python 做 BFS，每跳执行有端点过滤的 SQL；Neo4j/Ladybug 可以在图查询中展开路径。语义可相近，执行代价不同。[官方 Adapter 指南](https://docs.cognee.ai/guides/graph-engine-adapters)也介绍了这个工厂和适配器分层。
-
-当前真实表结构的职责如下。[完整表定义](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/tables.py#L28)。
-
-| 表 | 原生列 | 用途与约束 |
-|---|---|---|
-| `graph_node` | `id` 主键，`name`，`type`，`properties JSONB`，来源数组，创建/更新时间 | 一行一个节点；不同类型的属性放 JSONB，避免每增加一种节点模型都建表 |
-| `graph_edge` | `source_id`、`target_id`、`relationship_name` 复合主键，`properties JSONB`，来源数组，时间列 | 一行一条具体关系；端点是节点外键，删除节点会级联删除关联边 |
-| `graph_metadata` | `key` 主键、`value` | 保存 provenance 版本、删除模式等图级标记，不是用户权限表 |
-
-边的复合主键意味着：同一图内，同一源节点、目标节点和关系名合并为一条边。反方向、不同关系名可以共存；多个文档声明同一关系时，通常增加来源引用，不会自然变成多条相同三元组的物理边。如果业务要求“每条证据一条独立平行边”，需要额外设计证据节点或改变边身份模型，不能假定当前模型已经覆盖。
-
-**来源为什么也必须存？**
-
-假设文档 A 和 B 都声明“李工负责支付服务”。删除 A 时，应移除 A 的贡献，保留 B 仍支持的关系。这需要记录“数据是谁写入的”，仅有节点、边和外键不够。
-
-当前节点和边都带四组数组：`source_ref_keys`、`source_dataset_ids`、`source_run_ids`、`source_run_refs`。它们分别支撑来源引用、dataset 查找、流水线运行查找及来源与运行关联。应用应复用现有编码和更新 helper，不自行猜测字符串格式。删除和失败补偿要先撤销对应引用，再判断对象是否仍有其他来源；不能把普通 `DELETE node` 的级联行为当作“删除文档”的完整业务实现。[来源列](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/tables.py#L9)、[来源操作](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L964)。
-
-向量表则保存向量记录 ID、payload 和 embedding，用相似度寻找候选。节点索引可通过 ID 对应回图节点；关系文本的索引 ID 与某条具体边的 `edge_object_id` 不是同一种身份。反馈更新必须找到具体边，不能把所有叫“负责”的边当成一条边。[边 ID 生成](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/engine/utils/generate_edge_object_id.py#L4)、[向量记录模型](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/vector/pgvector/PGVectorAdapter.py#L322)。
-
-PG demo 的节点主键、边三元组主键及 ON CONFLICT 是明确的业务幂等设计。AGE换了一套物理模型后要重新落实相同约束；“PG有主键”和“AGE默认替我约束Cognee UUID”不是同一件事。
-
-### 3.2 功能缺口与 improve 九阶段
-
-
-| 模块/能力 | 当前 PG 状态 | 原因 |
-|---|---|---|
-| 核心图构建、邻域、子图、来源删除 | 已实现基础接口 | 普通 SQL 可表达且 adapter 已实现 |
-| CYPHER / NATURAL_LANGUAGE（NL→Cypher） | 不支持 | supports_cypher_queries=False；query 未实现 |
-| TEMPORAL 的时间过滤路径 | 有明确缺口 | 直接调用 collect_time_ids/collect_events，PG 无这些方法 |
-| improve 的图反馈权重、truth state | 跳过相应阶段 | PG 未实现扩展方法，能力探测返回不支持 |
-| close_node 写 valid_to | 不支持该更新路径 | PG 没有通用局部 update_node |
-| 全部边界行为完全一致 | 不能保证 | 例如缺少端点时 PG 外键行为与某些 adapter 跳过行为不同，未实测 |
-
-时间检索代码证据：[temporal_retriever.py](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/temporal_retriever.py#L124)。它只有未抽取到时间或时间查询为空时才转三元组；缺方法并没有在此捕获降级。因此 PG 支持 timestamp 列，并不能证明 Cognee TEMPORAL 已适配。
-
-[官方 Graph Stores](https://docs.cognee.ai/setup-configuration/graph-stores)及本地 README 均将开源 PG 图后端标为 demo，生产 PG 图适配器另行授权。官网通用 Adapter 指南部分文字提到 PG raw query 可执行 SQL，但与本版本 query() 实际未实现不一致；本报告以代码和专门能力声明为准。
-
-性能也不随接口统一而相同：PG k-hop 有多次 SQL 往返；PG 图写固定 advisory lock 会让同库 schema 写入竞争；PGVector create_vector_index 实际只建表，未自动创建 ANN 索引。可替换应分别验收功能语义、数据保真、性能与生命周期。
-
-### `modules/improve` 的“部分支持”逐阶段说明
-
-这里准确的目录名是 `cognee/modules/improve`。本节限定本报告的 Cognee 1.6.0 提交及开源 `postgres_demo` 图 adapter（`postgres` 是兼容别名），不是 PostgreSQL 数据库本身的能力上限，也不代表未公开的商业 PG adapter。
-
-只把关系数据库或向量数据库换成 PG，不会触发下面的图能力缺口；决定反馈/truth 支持的是**当前 dataset 实际使用的 graph adapter**。以下“有条件支持”表示调用链所需图接口在 PG adapter 中已有实现或有明确兼容路径，**不是本次已完成数据库+LLM端到端运行验收**。session store、LLM、embedding 和权限仍需分别配置。
-
-当前共有九个阶段，顺序由 [registry.py](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/registry.py#L31) 固定：
-
-| 阶段 | 实际做什么、数据落哪里 | 开源 PG 图后端状态 | 执行条件与限制 |
-|---|---|---|---|
-| `feedback_weights` | 根据 session 中的评分及回答使用过的节点/边，更新图元素的 `feedback_weight` | **不支持；正常能力探测后跳过** | 缺少节点/边反馈权重的批量读写方法；有 session 时才进入后端能力检查 |
-| `persist_session_qa` | 读取新 Q&A，转文本后 `add+cognify`，落永久图和向量索引 | **有条件支持** | 需要 session 与新内容、可用的摄入/抽取链；无新条目可返回 `already_completed`；这是唯一 fatal 阶段 |
-| `persist_agent_traces` | 读取未持久化的 agent trace 反馈文本，`add+cognify` 入图 | **有条件支持** | 默认持久化 `session_feedback` 内容，不是保证写入所有原始 trace；无新步骤可不执行 |
-| `extract_agent_context` | 从待处理 trace 提取 agent lessons，写 session context | **不依赖 PG 图专用扩展** | 需要可用 session manager、AUTO_FEEDBACK 和 LLM；此步本身不是更新图权重 |
-| `distill_sessions` | 从通过门禁的 session guidance 蒸馏经验，渲染文档再 `add+cognify` | **有条件支持** | 需要 session、LLM及可蒸馏内容；没有合适 guidance 时可能不产出文档 |
-| `update_user_preferences` | 写 `UserPreference` 节点和带 `weight/updated_at_turn` 的 `prefers` 边，更新文本、衰减并清理偏好 | **支持兼容路径** | 需开启 personalization；PG 缺局部 `update_node`，此模块明确回退完整节点 upsert；PG 能按三元组删除偏好边 |
-| `build_truth_subspace` | 从 `session_learnings` 建学习向量质心，对 chunk 计算并保存 `truth_alignment/truth_epoch`，用于可选重排 | **不支持；正常能力探测后跳过** | 必须先显式 opt-in、提供 session；PG 缺 `get_node_truth_state/set_node_truth_state`；不是自动事实真伪验证 |
-| `triplet_enrichment` | 分页读 source-edge-target 三元组，形成 Triplet embedding 并写向量索引 | **默认任务有条件支持** | PG 有 `get_triplets_batch`；需要开启 `triplet_embedding`（默认 false）；自定义 memify tasks 需另查接口，不能统一承诺 |
-| `global_context_index` | 读取已有摘要，构建 bucket/root 层次摘要节点、`summarized_in` 边及向量索引 | **有条件支持** | 显式 opt-in、LLM、摘要与正常来源结构；improve 选用实验性 graph bucketing；相关读取可能加载较大图，需测规模成本 |
-
-阶段源码：[会话持久化](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/stages.py#L110)、[上下文提取与蒸馏](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/stages.py#L168)、[偏好与 truth 门禁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/stages.py#L285)、[triplet 与 global context](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/stages.py#L378)。
-
-**缺失一：全局图反馈权重，不等于所有反馈能力都不能用。**
-
-该阶段实际要用 `get_node_feedback_weights`、`set_node_feedback_weights`、`get_edge_feedback_weights`、`set_edge_feedback_weights`。PG 没有覆盖这些方法，继承的是抛 `NotImplementedError` 的接口占位实现；能力探测检查两个 setter 是否覆盖，因此 `supports_feedback_weights=False`，阶段通常返回 `skipped / backend_unsupported`。[接口定义](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/graph_db_interface.py#L757)、[能力探测](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/capabilities.py#L23)、[实际权重读写](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/memify/apply_feedback_weights.py#L268)。
-
-例如用户给上轮回答差评，session 仍可以记录这个评分；但上述阶段不会据此改动回答引用过的普通图节点/边的 `feedback_weight`。只调 `feedback_influence` 是读取侧排序配置，不会补出缺失的权重写入。
-
-用户偏好则是另一套图结构：`UserPreference → prefers → 内容节点`，权重在这条偏好边上。它使用 PG 已支持的邻域、`add_nodes/add_edges` 和 `delete_edge_triples`；对缺失 `update_node` 有完整模型 upsert 回退。因此**全局反馈权重不支持，不能推导用户个性化偏好不支持**。偏好节点不走 embedding 索引。[偏好回退](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/user_preferences/store.py#L92)、[偏好边写删](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/user_preferences/store.py#L146)。
-
-**缺失二：truth subspace 坐标状态，不是所有经验蒸馏都失效。**
-
-`distill_sessions` 可以先把经验文档构图。`build_truth_subspace` 是后续可选步骤：将这些 learnings 转为质心，把 chunk 投影为坐标，将 `truth_alignment` 与 `truth_epoch` 存到图节点，最后提交匹配 epoch 的质心。在 PG 上，`get_node_truth_state/set_node_truth_state` 未实现，阶段门禁阻止执行；直接调用 build 函数也会在 embedding 前重新检查并返回不支持。[构建的能力检查](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/truth_subspace/build.py#L202)、[保存字段](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/truth_subspace/build.py#L373)。
-
-结果是不能通过这套自动构建路径获得对应的 truth alignment 重排信号；普通 Hybrid 检索仍可以运行。读取 truth context 时遇到缺失状态/异常也会回到 baseline ranking。[读取侧降级](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/hybrid/truth.py#L21)。这项名字虽然叫 truth，但本质是相对经验向量空间的对齐，不是数据库替应用验证事实真实性。
-
-**其余兼容链不是只根据“没有 capability gate”猜测。**
-
-- Q&A 和 trace 持久化最终分别调用 `add+cognify`；蒸馏也走同样路径，不调用缺失的反馈/truth setter。[Q&A](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/memify/cognify_session.py#L62)、[trace](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/memify/cognify_agent_trace_feedback.py#L79)、[蒸馏保存](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/session_distillation/distill.py#L433)。
-- Agent context 提取把候选经验交给 session context applier，然后更新 trace 水位；不是直接修改 PG 图权重。[agent context](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/session/agent_context_extraction.py#L263)。
-- 默认 triplet enrichment 调 `get_triplets_batch → index_data_points`；PG 通过 source/edge/target JOIN 分页返回三元组，向量侧再 embedding/index。[默认任务](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/memify_pipelines/memify_default_tasks.py#L6)、[PG 三元组读取](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L1437)。
-- Global context 读取摘要投影、来源及 summary→chunk→entity 关系，写摘要 DataPoint 与 `summarized_in` 边；所用图读取/upsert/delete/provenance 接口在 PG 有实现，无需 Cypher。图 provenance 分支会调用 `get_graph_data`，兼容不等于大图场景便宜。[输入读取](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/graph/methods/get_global_context_graph_inputs.py#L71)、[摘要和结构边保存](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/memify/global_context_index/persist.py#L74)。
-
-**另外，`close_node` 的缺口独立于九阶段。**
-
-`close_node(old_id)` 通过通用 `update_node` 给旧事实写 `valid_to`，表示失效但保留历史。PG 未实现这个局部更新接口，该 helper 捕获 `NotImplementedError`、记录 warning 并返回 `False`，**不会真的写入失效时间**。它不像用户偏好模块，没有完整 upsert 的兼容回退。`update_chunk_index` 虽然在 PG 已实现，但只是特定字段更新，不能代替通用 `update_node`。所以原报告的“事实维护”表述应细分为文档增量更新、偏好更新与事实有效期更新。[close_node](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/close_node.py#L21)。
-
-**如何解读一次 improve 的结果。**
-
-每阶段返回 `status/reason/error/counts`。判定顺序是配置关闭 → 缺 session → 阶段自己的 gate，所以同一个不受 PG 支持的功能，也可能先显示 `no_session_ids` 或 `opt_in_disabled`，而不是 `backend_unsupported`。无新内容可显示 `already_completed`；正常执行没有产出也不代表数据库缺能力。[通用门禁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/stage.py#L44)。
-
-非 fatal 阶段失败通常记录 `errored` 后继续，整体结果仍会反映错误；`persist_session_qa` 失败会中止后续阶段，前台可抛异常。若能力探测本身失败，代码采用 assume-supported 策略，让阶段执行后报告错误，因此“跳过”是正常探测成功时的行为，不是无条件保证。[结果汇总](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/result.py#L225)、[探测异常策略](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/capabilities.py#L90)。
-
-因此准确结论是：**九阶段中，图反馈权重与 truth state 两项被当前 PG adapter 明确阻断；另外七项有可用实现路径或不依赖 PG 图扩展，但是否执行取决于输入、配置和其他依赖。不能将其表示成“improve 有 7/9 的生产可用率”。**
-
-**PG/华为云是否能补齐？**从数据表达看可以：反馈权重、truth 坐标/epoch、valid_to 都可由普通 PG 字段或 JSONB 保存，缺的是 Cognee adapter 的读写契约实现，通常不需要另装图数据库扩展。实现时必须保留原属性、正确映射节点与 edge_object_id、处理批量读写/不存在对象/并发和 dataset 作用域；truth 还需保持坐标与质心 epoch 的发布顺序。切到华为云 PG、增加 pgvector 或仅把 `supports_*` 标志改为 true，都不会自动补齐这些逻辑。本轮补充文档，没有修改 adapter 或声称这些缺口已修复。
-
-### 3.3 缺失接口如何补：数据形状和更新合同
-
-下面保留普通 PG 路线的具体改造依据，以说明为什么“能存数字/数组”仍不等于“已支持学习”。AGE与其他后端也必须保持这些返回值、状态保护和发布顺序；这不是建议本项目继续以普通SQL图作为最终选型。
-
-
-### 反馈权重：补四个方法，数据仍是 JSONB 数值
-
-这部分对应 improve 中当前 PG 缺少的 `feedback_weights` 图能力。上层根据反馈调整节点和具体边的权重，后续检索可利用这些状态。缺口是接口实现，不是 PG 无法保存浮点数。
-
-| 方法 | PG 实现方向 | 必须保持的行为 |
-|---|---|---|
-| `get_node_feedback_weights(ids)` | 按节点主键批量查 JSONB | 只返回存在的对象；已有节点未设权重时返回默认 `0.5` |
-| `set_node_feedback_weights(mapping)` | 按主键批量局部更新 | 不创建缺失节点；每个输入 ID 返回成功/失败 |
-| `get_edge_feedback_weights(ids)` | 按 `properties ->> 'edge_object_id'` 查边 | ID 指具体边，不是关系名或关系文本向量 ID |
-| `set_edge_feedback_weights(mapping)` | 定位真实复合主键行后局部更新 | 每个输入边 ID 返回成功/失败，保留其他属性及来源 |
-
-参考契约见 [Ladybug 反馈实现](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L2474)。对于坏的存量权重，现有 adapter 的容错并不完全一致，应明确 PG 的转换和校验规则。不能把严格 `[0,1]` 校验、拒绝 NaN/Inf 描述成所有现有 adapter 已经保证的行为。
-
-建议用数据库侧 JSONB patch，例如更新某节点权重：
-
-```sql
-UPDATE graph_node
-SET properties = COALESCE(properties, '{}'::jsonb)
-                 || jsonb_build_object('feedback_weight', CAST(:weight AS double precision)),
-    updated_at = now()
-WHERE id = :node_id
-RETURNING id;
-```
-
-这样只改指定字段，避免 Python 先读整个 JSON、再写回旧副本而覆盖其他字段。生产实现仍需使用现有写事务/锁约定，处理批量和逐项结果。JSONB 合并是顶层合并，不能用它冒充递归深合并。[PG JSONB 说明](https://www.postgresql.org/docs/current/datatype-json.html)。
-
-边 ID 查询建议增加匹配表达式的 B-tree 索引；是否可加唯一约束，要先检查历史 ID 完整性及唯一性。旧边没有 `edge_object_id` 时，应明确返回未找到，或者通过独立迁移按现有生成算法补齐，不能改用其他 ID 代替。[边 ID 写入](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/graph/utils/prepare_edges_for_storage.py#L114)。
-
-还有一个不同层次的问题：上层是“get → Python 计算 → set”。两个进程都读到 0.5，各自算出新值，最后一个 setter 仍可能覆盖前一个结果。原子 JSONB patch 只能避免无关字段覆盖，不能自动使每条反馈都生效。如果这是验收要求，需要增加 CAS/版本重试、数据库侧计算，或让整个读算写过程受同一个跨进程锁保护。[反馈调用方](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/memify/apply_feedback_weights.py#L130)。
-
-### truth state：补两个方法，同时保留 epoch 发布协议
-
-这里的 truth state 是检索排序所用的对齐坐标与版本，不是数据库替用户判定事实真假，也不是把原始 embedding 再复制一份。
-
-建议继续存于节点 JSONB：`truth_alignment` 为数组，`truth_epoch` 为整数。`get_node_truth_state(ids)` 返回 `{id: {truth_alignment, truth_epoch}}`；不存在节点不返回，存在但未初始化的节点返回 `[] / None`。`set_node_truth_state(mapping)` 更新已有节点并逐项返回 bool。[参考实现](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L2509)。
-
-alignment 和 epoch 必须作为一组在同一行更新中写入，避免新坐标配旧版本。现有参考行为是：未提供 epoch 或传入 None 时保留已有 epoch；不能在 PG 中擅自改为清空或自行递增。
-
-build 的顺序是：先写 N+1 的节点坐标，最后发布 N+1 的质心；检索只使用与当前 live epoch 一致的节点状态。新 epoch 未成功发布前，读侧仍以旧 live epoch 为准，已写为 N+1 的节点会因版本不匹配而暂不参与 truth 加权，并不保证整套旧坐标仍完整保留。所有节点写入都返回 False 时，上层阻止发布；部分节点成功则可以发布新 epoch，此时未更新节点的旧坐标不参与 truth 加权。因此 setter 必须如实返回逐项结果。这要求 adapter 与调用层共同遵守协议，但不要求 PG 安装图扩展。[构建顺序](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/truth_subspace/build.py#L407)、[检索 epoch 门禁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/hybrid/ranking.py#L37)。
-
-### `update_node` 与重复入库：比“加个 UPDATE”更容易遗漏的部分
-
-`update_node(id, properties)` 应只覆盖指定属性，保留其他属性；空补丁、无效或不存在 ID 返回 False。节点关闭 `close_node` 需要这个方法写 `valid_to`，PG 当前没有实现该通用接口，因此不能正常完成这条更新路径。它是独立于 improve 九阶段的能力。[close_node 调用](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/close_node.py#L21)、[参考 patch 实现](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L2550)。
-
-PG 中 `id/name/type` 是原生列，其他大部分模型字段在 JSONB。实现必须规定哪些字段允许改：保护 ID 和来源字段；允许改 name/type 时要更新原生列，不能只往 JSONB 塞同名字段，导致读出的对象与 SQL 过滤所见不同。模型时间字段与数据库维护的时间列也要分清。[节点序列化](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L46)、[节点读出](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L440)。
-
-必须一并审查现有 `add_nodes/add_edges`：冲突更新使用 `properties = EXCLUDED.properties`，即整体替换 JSONB。某节点学到了 feedback/truth 或设置了 valid_to，后来一次全量 upsert 的输入没有这些字段，或者新模型携带默认权重/null，就可能清掉或重置它们。模型完整序列化会包含默认值，因此不能仅在新 JSON 缺少键时保留旧状态；必须区分普通摄入与显式状态重置。不是每次 cognify 都必然触发该情况，但“实际走到全量重写”的路径必须覆盖。来源数组已有单独保留逻辑，不能据此推断 JSONB 状态也被保留。[节点序列化](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L46)、[节点 upsert](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L348)、[边 upsert](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L471)。
-
-建议明确字段归属，而不是对所有属性盲目使用“旧值 || 新值”：
-
-| 字段类别 | 建议写入规则 |
-|---|---|
-| 抽取/文档模型负责的业务属性 | 由新模型替换；需要支持业务字段删除，不能无限保留旧键 |
-| feedback 等学习状态 | 同一对象身份下保留，重置走明确入口 |
-| truth 等派生状态 | 内容未改变时可保留；内容或模型改变时需失效并重算，不能永久沿用旧坐标 |
-| valid_to 等生命周期状态 | 由生命周期操作控制；重新入库是否重开必须显式定义 |
-| provenance | 继续调用专门的引用维护逻辑，不混入通用属性 patch |
-
-短期可在同一 JSONB 中按保留键和失效规则实现；长期若状态更新频繁，可评估单独状态列/状态表。后者隔离字段归属更清楚，但增加 join、迁移和维护工作，不纳入最小补齐范围。
-
-### Temporal：普通 SQL 可实现，但要复制真实语义
-
-需要新增 `collect_time_ids` 与 `collect_events`。参考 Ladybug，前者筛选 Timestamp 节点，`time_at` 是 UTC epoch 毫秒；上下界均包含。后者从时间节点沿任意关系无向走 1～2 跳，收集去重的 Event，返回 `[{"events": [...]}]`，空结果也保留这个外层结构。[时间节点生成](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/engine/utils/generate_timestamp_datapoint.py#L39)、[两方法参考实现](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L3701)。
-
-PG 可按 `type='Timestamp'` 和 JSONB 时间值过滤，再用两层边连接或有界递归找到 Event，无需图查询语言。应使用参数化 ID 列表，避免复制某些 adapter 中“先拼带引号 ID 字符串”的做法。时间表达式索引必须匹配查询，并先处理历史缺值和非法数字，不能直接对脏数据强制 bigint 转换后建索引。
-
-两点需要作为产品边界写清楚：
-
-- 当前逻辑是“时间点落在区间内 → 找附近事件”，不等同于严格的“事件持续区间与查询区间相交”。跨越整个查询区间、两个端点都在区间外的事件可能不被命中；升级为区间相交检索另计。
-- 当前 TemporalRetriever 先做全局 `Event_name` 向量 top_k，再给时间候选打分；不在该 top_k 内的候选缺少有限分数。补齐 PG 方法不自动改善这部分排序，若改成候选集内打分，需要额外检索质量评测。[TemporalRetriever](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/temporal_retriever.py#L109)。
-
-### 生产化最主要的改造及其原因
-
-| 当前代码事实 | 对实际负载的影响 | 建议与验证 |
-|---|---|---|
-| 图写入采用固定 advisory lock key `5522063` | 同一数据库内不同 dataset schema 也竞争同一把写锁；读不取此锁 | 改为稳定的 schema/图级锁键，保留同图正确性；跨进程验证。滚动升级期间新旧锁协议不一致，须协调停写切换或兼容过渡 |
-| BFS 已按前沿端点查询，有端点索引 | 不是每层必然全表扫描，但 hub 节点/高深度仍可产生巨大结果与网络传输 | 增加节点/边/时间预算、超限语义及指标；按真实图度分布压测 |
-| 部分属性过滤先读整张节点表再 Python 过滤 | 大图时增加数据库到应用的数据量和内存 | 将允许的条件下推 SQL，按真实条件组合评估索引 |
-| 来源数组有 GIN，但部分查询写为 `:token = ANY(array)` | 有索引不代表该谓词能使用它 | 改为匹配数组 GIN 的 `@>` 等表达式，检查 NULL/空数组语义，用 EXPLAIN 验证 |
-| 三元组使用 OFFSET 分页，每批独立 session | 深分页成本增长；并发增删可能重复或漏项 | 加游标分页或明确一致快照策略，兼容旧 offset 接口 |
-| 初始化仅 `create_all(checkfirst=True)` | 能建新表，不会完成现有 schema 的列/索引升级 | 增加 schema 版本、迁移、回填、失败恢复；覆盖所有已有 dataset schema |
-| PGVector 的 `create_vector_index` 创建 collection 表 | 名称包含 index，不表示已建 HNSW/IVFFlat | 按实际维度、距离类型、版本、数据量建立 ANN 策略并测召回与延迟 |
-| 图、向量、关系库分开提交 | 同实例不等于全流程原子提交 | 验证现有补偿；需要 durable job/outbox 或单事务重构时另立项目 |
-
-证据：[写锁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L104)、[全量读取后过滤](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L816)、[来源查找](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L1230)、[分页](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L1437)、[初始化](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L305)、[向量 collection 创建](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/vector/pgvector/PGVectorAdapter.py#L485)。PG 官方列出了 GIN 数组运算符支持范围，不能将标量 ANY 写法和数组包含运算符视作同一个索引条件。[PG GIN 文档](https://www.postgresql.org/docs/17/gin.html)。
-
-这里可以判断风险来源，不能据此给出“PG 比 Neo4j 慢几倍”或“支持千万节点”的结论。需将数据库时间、网络往返、应用图展开、embedding、LLM 调用分开测量，否则端到端延迟不能归因于图存储。
-
-### 3.4 把工程限制翻译成用户遇到的事
-
-| 已识别限制 | 具体用例及后果 | 修复后还需证明什么 |
-|---|---|---|
-| 同库固定写锁 | 甲、乙写各自schema的私有资料，也可能竞争同一把图写锁；隔离数据不等于隔离写入等待 | 改图级锁并测跨进程一致性，迁移期间旧新锁协议要协调 |
-| 多跳往返/高度节点 | 星河关联了大量人员和文档，一跳frontier已很大，再扩两跳会传输大量候选；不是每次都全表扫描 | 限制节点/边/时间预算，并测实际召回是否被截断 |
-| Python属性过滤 | 只想找一个部门的实体，却先取出全库节点再过滤 | 下推条件、匹配索引；测扫描和返回行数 |
-| 来源数组谓词与索引不匹配 | 撤回一个文档时，希望快速找出它支持过的边，写成不匹配GIN的条件仍可能扫大量行 | 对实际SQL执行EXPLAIN；不能只检查索引存在 |
-| OFFSET跨事务分页 | 分页构建Triplet索引时，另一任务在前面插入/删除边，后续页可能重复或漏项 | 稳定游标或一致快照，重放并发增删 |
-| create_all不是迁移 | 旧dataset已有表，升级新增反馈索引后仅调用create_all不会补齐结构 | 每dataset迁移版本、回填、失败恢复 |
-| 向量建表不是ANN | 10万条chunk写入后能检索，不说明已经通过HNSW加速 | 核实真实索引、距离算子、维度与召回率；图库替换不替你解决向量瓶颈 |
-| 图/向量分开提交 | 图节点已存在，embedding写失败；重试不能再复制图节点或误删他人来源 | 幂等、补偿、故障注入，必要时另做durable job/outbox |
-
-以上都来自上一节的具体源码接点。它们说明需要优化什么，不能推出纯PG在所有负载下都不现实；同样不能因为SQL行数少就宣布快。本文按用户关注点继续评估AGE，但保留这条证据边界。
-
+**这一章的取舍：先把AGE当作有实现依据的候选后端，下一步确认能否部署；不要先假定它已完整兼容或性能必胜。**
 
 <a id="age-versions"></a>
-## 4. AGE与PG的版本矩阵，以及华为云能否部署
+## 2. 哪个版本可用：建议验证PG18＋AGE1.8，华为云要另过安装关
 
+**本章结论：所核查的AGE版本都没有开箱即用的Cognee适配器。新开发优先以PG18＋AGE1.8做概念验证（PoC，用最小真实实验验证方案），因为它补充了写入分支和最短路能力；但华为云提供PG18，不等于托管实例能安装AGE。**
 
-必须选择对应 PG 主版本的 AGE 发布包。下表覆盖本轮核验的 1.6～1.8 正式发布组合；不代表 AGE 的全部历史版本，也不声称其他组合绝对不能自行移植。
+### 2.1 AGE与PG必须按对应发布包配套
 
-| AGE 版本 | 已核实正式发布的 PG 组合 | 华为云 RDS 是否提供这些 PG 主版本 | 华为云标准 RDS 是否公开列出 AGE 插件 | 当前是否可直接切换 Cognee |
-|---|---|---|---|---|
-| **1.6.0** | **PG14、PG15、PG16、PG17**，各用对应包 | 是 | **未列出** | 否，需要新 adapter |
-| **1.7.0** | **PG17、PG18**，各用对应包 | 是 | **未列出** | 否，需要新 adapter |
-| **1.8.0** | **PG18**，本轮正式基线 | 是 | **未列出** | 否，需要新 adapter |
-| 1.8.0 / PG15 候选 | GitHub 条目仍为 prerelease，说明待 PMC 批准 | PG15 本身有 | 未列出 | 不作为正式交付基线 |
-
-正式发布身份交叉核对 [Apache 分发目录](https://dist.apache.org/repos/dist/release/age/)、[PG17 的 1.6 发布](https://github.com/apache/age/releases/tag/PG17%2Fv1.6.0-rc0)、[PG18 的 1.7 发布](https://github.com/apache/age/releases/tag/PG18%2Fv1.7.0-rc0)、[PG18 的 1.8 发布](https://github.com/apache/age/releases/tag/PG18%2Fv1.8.0-rc0)和[PG15 候选](https://github.com/apache/age/releases/tag/PG15%2Fv1.8.0-rc0)。当日元数据见[发布证据快照](evidence/age-version-evidence-20260928.json)。部分正式 tag 仍带 `rc0`，不能只看名字判断候选身份；也不能把当前下载目录中的最新版误当作唯一支持组合。
-
-华为云[引擎版本表](https://support.huaweicloud.com/productdesc-rds-pg/zh-cn_topic_0043898356.html)已经列出 PG14～18；[插件清单](https://support.huaweicloud.com/intl/zh-cn/usermanual-rds-pg/rds_09_0045.html)列有向量插件，但没有 AGE。因而当前公开条件下，**障碍是服务端扩展可安装性，不是缺少 PG18**。具体地域、小版本和实例以实际可用性为准。云服务可安装性只能引用厂商资料及实例查询，不能假装能从 AGE 开源代码证明华为云内部配置。
-
-AGE 的 Makefile 使用 `PG_CONFIG`/PGXS 编译服务端 C 扩展；不是客户端协议转换库。所审代码没有“一律拒绝其他 PG major”的 guard，所以不能虚构这种源码证据；同样，缺少 guard 也不证明一个源码包/二进制跨 major 可用。[1.6 构建入口](https://github.com/apache/age/blob/2db2f060c4c9265a14d40f007eb8c56febf31e4c/Makefile#L137)、[1.7 构建入口](https://github.com/apache/age/blob/e1467f12e0b1d15dd35d3ab93f057a7112d425b8/Makefile#L138)、[1.8 构建入口](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/Makefile#L276)。
-
-| 部署选择 | 可成立的条件 | 结论 |
+| AGE版本 | 本轮核实的正式PG组合 | 相比新版需注意什么 |
 |---|---|---|
-| 直接在现有华为云 RDS 安装 AGE | 实例服务端确实提供 AGE，且允许安装/加载 | 公共插件清单没有给出此条件，不能承诺可行 |
-| RDS 保存关系/向量，另用自管 PG＋AGE 保存图 | 能部署并维护另一个 PG 图服务；Cognee 分别配置图与向量 adapter | 架构上有现成后端分离接点；仍需开发 AGE adapter |
-| 华为云 ECS/容器中自管 PG＋AGE＋pgvector | 有服务端安装权限并完成部署、备份和目标组合验证 | 可进入适配 PoC；不等同托管 RDS 已支持 AGE |
+| 1.6.0 | PG14、15、16、17，各有对应包 | 缺少新建/匹配后的条件赋值语法和新版专用最短路入口；不同PG分支还有差异 |
+| 1.7.0 | PG17、18，各有对应包 | 仍缺上述条件赋值语法和新版专用最短路入口 |
+| 1.8.0 | PG18 | 本报告建议验证的组合；仍不是完整Neo4j方言兼容 |
+| 1.8.0的PG15条目 | 当日仍为预发布 | 不作为本报告正式交付基线 |
 
-实例只读核验可查询 `pg_available_extensions` 中是否存在 `name='age'`，以及 `pg_extension` 的已安装版本。客户端能连 PG、能调用 pgvector，均不能弥补服务端缺少 AGE 扩展。
+核验依据：[Apache发布目录][age-releases]、[PG17/1.6][age16-release]、[PG18/1.7][age17-release]、[PG18/1.8][age18-release]、[发布证据快照][release-snapshot]。部分正式标签名称仍带`rc0`，应结合发布身份判断，不能仅按名字推断。
 
-### 4.1 已有原语与缺失原语
+### 2.2 哪些版本缺失会影响哪些流程
 
+这里的结构化查询语言（**SQL**）是PG的查询语言；AGE允许从SQL调用图查询。以下“有”只指所列能力，不代表所有图查询都兼容。
 
-下面区分“数据库本身缺少功能”和“Cognee 尚未适配”。表中“有”只限所列语法和能力，绝不表示整个 Neo4j Cypher 方言等价。
+| 能力或缺口 | AGE1.6 | AGE1.7 | AGE1.8/PG18 | 触发场景与影响 |
+|---|---|---|---|---|
+| 节点/边创建、匹配、普通匹配或创建、属性更新、批量输入、列表属性 | 有 | 有 | 有 | 可作为存储与查询基础；业务去重、来源和状态规则仍由适配器实现 |
+| 新建时赋默认值、已存在时执行另一组更新：`ON CREATE / ON MATCH` | 缺 | 缺 | 有 | 重复导入要保住已学到的权重。旧版须另做事务分支；新版也不能自动判断哪些字段该保留 |
+| 不带返回结果的子查询合并：`UNION`相关写法 | PG14～16缺；PG17分支有 | 有相应解析 | 有相应解析 | 主要影响使用该写法的自定义查询；固定写入模板可避开，不是所有查询合并都失效 |
+| 专用无权最短路入口 | 未提供新版入口 | 未提供新版入口 | 有`age_shortest_path`等 | 旧版需另实现相关算法；普通一两跳邻域不以此为前提 |
+| Neo4j原有最短路模式语法 | 不等价 | 不等价 | 仍不等价 | 自定义查询或自然语言生成的查询可能报错，必须改方言 |
+| Neo4j多模型标签的原样表达 | 不能直接假定等价 | 不能直接假定等价 | 仍不能机械照搬多标签 | 要把类型映射为属性或标签集合，并一起修改类型筛选，详见第3章 |
+| 行级安全（**RLS**，按规则限制哪些数据行可访问） | 缺少本轮确认的新版显式插入检查路径 | 有相关策略/角色测试 | 有相关实现/测试 | 普通操作通过不代表全部路径查询都已隔离安全；须独立验证，不能作为唯一租户隔离依据 |
 
-| 数据库能力 | 1.6 / PG14～16 | 1.6 / PG17 | 1.7 / PG17、18 | 1.8 / PG18 | 对 Cognee 的实际影响 |
-|---|---|---|---|---|---|
-| 节点/边 CREATE、MATCH、普通 MERGE | 有 | 有 | 有 | 有 | 可存图；默认不约束Cognee UUID/边三元组。W2/W3必须补业务索引和冲突恢复，否则可能重复实体/关系，详见第5节 |
-| UNWIND 批量输入 | 有 | 有 | 有 | 有 | W2仍需批内去重、批次事务与错误映射；不能把单语句重复输入回归当成跨进程幂等证明 |
-| SET、SET += map、REMOVE、DETACH DELETE | 有 | 有 | 有 | 有 | NULL会移除属性，默认值可能覆盖学习状态；直接DETACH删除共享实体会误删其他来源。W4/W5必须先执行业务状态规则 |
-| 属性 map/list、IN、coalesce、列表推导 | 有 | 有 | 有 | 有 | 列表不是自动去重的集合；来源合并丢更新会影响共享删除。W4负责集合与并发状态维护 |
-| SQL PREPARE＋Cypher 参数 map | 有 | 有 | 有 | 有 | W2转换参数/结果；动态label和关系类型不能当普通值参数替换，须安全模板/分组；原Neo4j调用协议不直接复用 |
-| 固定跳 MATCH、有界变长路径 VLE | 有 | 有 | 有 | 有 | W6仍需将路径结果转成合同要求的节点集合和诱导边，保留孤立seed；有VLE不代表结果和性能自动等价 |
-| **MERGE ON CREATE SET / ON MATCH SET** | **缺语法** | **缺语法** | **缺语法** | **有** | 旧版需要显式区分新建/更新及事务策略；不能原样执行新语法 |
-| **无 RETURN 子查询 UNION** | **明确报未实现** | **有解析实现** | 有解析实现 | 有解析实现 | 同为 1.6 也有分支差异；基本 Cognee 固定模板不必依赖此项 |
-| **内置 age_shortest_path / age_all_shortest_paths** | **未提供** | **未提供** | **未提供** | **有，标准路线为无权最短路** | 旧版缺专用 API，但不等于不能自行计算最短路；普通邻域不需要它 |
-| **Cypher RETURN shortest_path(a,b)** | **未提供该内置入口** | 同左 | 同左 | **有** | 1.8 不仅能从外层 SQL 调最短路，也有 AGE Cypher 函数入口 |
-| **Neo4j shortestPath((a)-[*]->(b)) 原语法** | 不提供相应模式产生式/内置兼容 | 同左 | 同左 | **仍不等价支持** | 必须改写 Neo4j 查询/prompt，不能仅替换连接串 |
-| **APOC三项对应写入行为** | **无同名库** | **无同名库** | **无同名库** | **无同名库** | 原样节点/批量边查询会失败，正常入图前必须在adapter实现集合合并、类型映射、关系写入；不是要求开发APOC库 |
-| **GDS七项统计调用** | **无同名库** | **无同名库** | **无同名库** | **无同名库** | 不阻断常规会话本身；原统计路径会失败。摘要可能回退0，WCC不可用，optional路径/聚类缺失。分别按启用场景处理，见第6章 |
-| 普通 Cypher RLS 检查 | 缺少本轮确认的新版显式 INSERT RLS 检查路径 | 同左 | 已有 policy/WITH CHECK 及角色测试 | 已有对应实现/测试 | 1.6 不能按 PG 原生能力推定安全；1.7/1.8 全 VLE/cache 路径仍未完成本轮安全证明 |
+证据：[1.6各分支源码矩阵][age16-evidence]、[1.7/1.8源码矩阵][age18-evidence]。1.8最短路按跳数，不能当作按权重选最低成本路径；当最少跳数参数`min_hops`大于实际最短距离、同时指定多种边类型时，所查实现明确报不支持，并非所有多类型查询都失败。逗号分隔值文件（**CSV**，一种表格文本格式）的AGE装载器会拒绝启用行级安全的目标表；选用这种批量捷径时需换受支持的写入路径，不能为导入直接关闭隔离。这两项应专项验证，不应泛化为普通问答都不可用。[路径限制代码][age-path-limit]、[权限/导入核查][age18-evidence]。
 
-上述表覆盖本任务所需能力与相关方言缺口，不是全部 openCypher conformance 清单。[1.6 四个分支逐项源码证据](evidence/age16-source-matrix.md)、[1.7/1.8 及 PG18 分支证据](evidence/age17-age18-source-matrix.md)保存了读取范围、expected 对照和未验证边界。
+### 2.3 华为云：缺扩展不能用客户端协议补出来
 
-AGE服务端固定版本许可证为 [Apache-2.0](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/LICENSE)。本矩阵只覆盖本项目核验范围，不是所有openCypher语法的完备性证明。
+华为云关系型数据库服务（**RDS**，厂商托管的数据库）公开版本表已列PG14～18；所核查的插件清单有pgvector（PG向量检索扩展），**未列AGE**。具体地域、实例小版本和可安装扩展仍需实例核验。[引擎版本][huawei-versions]、[插件清单][huawei-plugins]。
 
-新增核查边界：1.8仍是单个物理节点label模式，不能机械复制Neo4j多label；最短路在“min_hops超过真实最短距离＋多个关系类型”的特定组合还会明确报不支持，具体见下一节。
-
-### 4.2 如何验证目标华为云实例，而不是猜测
-
-本轮重新核对的[华为云引擎页](https://support.huaweicloud.com/productdesc-rds-pg/zh-cn_topic_0043898356.html)列有PG18；[插件清单](https://support.huaweicloud.com/intl/en-us/usermanual-rds-pg/rds_09_0045.html)列有pgvector，未列age。地域、实例小版本仍以目标实例为准。未连接用户实例，因此下面是待执行的只读核验，不是本次结果：
-
-```sql
-SELECT version();
-SELECT name, default_version, installed_version
-FROM pg_available_extensions WHERE name IN ('age', 'vector');
-SELECT extname, extversion FROM pg_extension
-WHERE extname IN ('age', 'vector');
+```mermaid
+flowchart TD
+    A[目标是华为云托管PG] --> B{服务端是否确实提供并允许安装AGE}
+    B -->|是，需实例核验| C[安装对应版本并验证适配器]
+    B -->|未提供| D{是否允许另部署图服务}
+    D -->|允许| E[托管PG保留关系和向量；另建自管PG加AGE]
+    D -->|不允许| F[AGE路线在部署阶段不成立]
 ```
 
-`pgvector`产品名对应的扩展SQL名是`vector`。若没有age服务端安装包，换驱动、执行CREATE EXTENSION、增加Agent数量都不能补齐。安装入口只创建服务器已有扩展的SQL对象；RDS数据库root不是宿主机root。[华为云安装说明](https://support.huaweicloud.com/usermanual-rds-pg/rds_09_0043.html)、[AGE安装机制](https://age.apache.org/age-manual/master/intro/setup.html)。
+AGE是服务器扩展，需要服务器上有对应安装包和权限。修改驱动、连接地址或网络协议，不能在缺少扩展的服务器里变出图能力。可选择弹性云服务器（**ECS**，可自行安装软件的云主机）或容器自管PG＋AGE，但这增加了部署、备份和维护责任。[AGE安装][age-install]。
 
-若关系和向量必须留在RDS，可让图adapter连接另一个自管PG＋AGE服务；若不愿维护第二个PG服务，则后文Ladybug/服务型图库才是需要比较的部署方案。
+只读核验可查询`pg_available_extensions`是否有`age`，以及`pg_extension`是否已安装；pgvector的扩展名是`vector`。本轮未连接用户实例，不把公开清单当成目标实例的实测结果。
 
+**这一章的取舍：版本上优先验证PG18＋AGE1.8；部署上先确认服务端安装条件。若必须只用当前未开放AGE的标准托管实例，后续适配代码再完善也无法落地。**
 
 <a id="age-gaps"></a>
-## 5. 缺口逐项拆解：什么数据进来，会在哪里失败
-
-先分清两种缺口：语法/过程不存在，会直接报错；原语存在但业务合同没有落地，可能写成功却保存错状态。后者通常更难发现。下面每个例子都对应矩阵的一项，而不是抽象说“兼容性待完善”。
-
-
-### 案例1：新建默认0.5，与“已学到0.9”不是一回事
-
-文档A写入“张三负责星河”，张三节点初始 feedback_weight=0.5。用户多次正向反馈后，数据库中的权重变为0.9。第二天导入文档B，又生成同一业务UUID的张三，新的DataPoint对象仍带默认0.5。[DataPoint默认字段](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/engine/models/DataPoint.py#L76)。
-
-适配器若一律 `MERGE ... SET n += 所有输入属性`，会把0.9覆盖为0.5；若 valid_to 原来是事实关闭时间，而新对象的 valid_to=None，也可能清掉这个状态。数据库没“丢数据”，它准确执行了我们的覆盖要求；错误在于应用没有区分“业务文档字段”与“后来学习的字段”。
-
-AGE1.8的ON CREATE/ON MATCH让开发者可以表达：第一次建节点才写默认反馈；已存在时仅更新文档字段。1.6/1.7原样运行带这两分支的模板会语法失败，需用事务中明确的存在判定、创建/更新分支实现同一业务规则。**旧版多了适配分支，不是无法保存0.9。**[1.8执行分流](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/executor/cypher_merge.c#L359)。
-
-这只是建议新adapter采用的字段所有权设计，不是声称当前Cognee全部后端已经实现。现接口还明确说upsert会overwrite properties，所以需同时冻结“显式reset如何表达”的合同；不能无条件忽略用户显式传来的0.5。ON MATCH自身也不会创建UUID唯一索引，不防止两个会话同时创建同UUID。验收必须分成状态保留、显式重置、并发唯一三组。
-
-### 案例2：UNION缺的是“省略RETURN的子查询写法”，不是查询合并全失效
-
-用户问：“列出养宠物，或者认识同事的人”。它可写成外层MATCH人、EXISTS子查询内两段MATCH用UNION连接：一段找宠物，一段找同事；因为只问存在，子查询省略RETURN。
-
-AGE1.6/PG14～16读到这个指定产生式直接报 `Subquery UNION without returns not yet implemented`。PG17/1.6已经把此分支改为 `make_subquery_returnless_set_op`，上游回归含“人→宠物”和“人→人”的无RETURN UNION实例。[旧分支错误](https://github.com/apache/age/blob/2db2f060c4c9265a14d40f007eb8c56febf31e4c/src/backend/parser/cypher_gram.y#L652)、[PG17分支](https://github.com/apache/age/blob/54905a09bf8462f22a87c3adfd2ab5752e5c1e71/src/backend/parser/cypher_gram.y#L638)、[对应测试](https://github.com/apache/age/blob/54905a09bf8462f22a87c3adfd2ab5752e5c1e71/regress/sql/cypher_subquery.sql#L73)。
-
-旧版可考虑把两条件改成两个EXISTS以OR组合，或各分支显式RETURN对齐列；具体模板仍须回归。**Cognee固定CRUD/邻域方法并不要求这个写法。**因此默认入库和普通检索不应为这一个方言缺口被判成不支持；公开raw Cypher和NL生成可能受影响，要有AGE方言限制与失败提示。
-
-### 案例3：路最短有两种含义，AGE1.8只新增了其中一种
-
-图中有两条从“张三”到“赵六”的路径：直达边1跳，cost=100；经过李四的两条边各cost=1，总2跳、cost=2。无权最短路选1跳，最低费用路径选2跳。AGE1.8这两个函数的参数只有图、起终点、边类型、方向和跳数界，没有weightProperty参数，标准实现是BFS按跳数。因此不能把新增最短路说成带权Dijkstra，不能直接将反馈权重代入后宣称优先走可信关系。[安装声明](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/sql/agtype_typecast.sql#L101)、[无权BFS实现说明](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L2798)。
-
-1.6/1.7缺这两个专用内置函数，原样调用报函数不存在；可以自己做BFS，或有限制地枚举后筛选，但成本必须评估。普通“取张三的一跳邻居”不要求最短路函数，因此不受该函数缺失直接阻断。1.8的 `RETURN shortest_path(a,c)` 有明确回归，Neo4j `shortestPath((a)-[*]->(c))` 则不能原样搬过来。[AGE Cypher实例](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/regress/sql/age_shortest_path.sql#L418)。
-
-Cognee当前GDS统计调用没有配置关系权重，属于其现有无权统计口径，不能拿“AGE无带权算法”虚构成当前默认回答功能的硬缺口。[现GDS调用](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/neo4j_metrics_utils.py#L153)。但是“一个起终点的所有等长最短路径”与GDS“全部点对距离”仍不同：要算全图平均距离仍需按多个起点计算并聚合。
-
-新增函数也不保证每次都便宜：若min_hops高于真实最短距离，代码回退DFS找满足下界的路径；all_shortest在首次调用物化结果，外层LIMIT并不保证少算。[回退分支](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L3298)、[首次物化](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L3781)。
-
-**1.8还有一个明确组合限制**：若同时指定多种关系类型，且min_hops比真实最短距离更大，fallback分支直接抛FEATURE_NOT_SUPPORTED。例如张三与赵六已有1跳关系，用户要求“只能走认识或协作两类边，而且至少2跳”；若触发上述分支，不能完成该查询。原因是该fallback使用的VLE只接受单边label。可以限制公开查询参数、另行实现所需搜索算法，不能说1.8的类型过滤和最小跳数任意组合都支持。这个高级组合不是当前默认一跳邻域的必需项。[明确拒绝代码](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L3677)。
-
-### 案例4：100用户的权限，不能由“PG支持RLS”四个字推导
-
-假设甲、乙的节点混在一张底层表，靠tenant_id及RLS隔离。正确目标是：甲MATCH看不到乙节点；甲CREATE/SET也不能写成乙tenant_id。AGE1.7/1.8普通DML有WITH CHECK及角色回归；1.6没有本轮所审的新检查路线。不能因为底座是PG，就认定1.6所有Cypher写入自动经过相同检查。[WITH CHECK](https://github.com/apache/age/blob/e1467f12e0b1d15dd35d3ab93f057a7112d425b8/src/backend/executor/cypher_utils.c#L280)、[角色回归](https://github.com/apache/age/blob/e1467f12e0b1d15dd35d3ab93f057a7112d425b8/regress/sql/security.sql#L666)。
-
-即使1.8普通MATCH/DML通过，也还不能据此宣布所有VLE/最短路缓存访问和连接池角色切换已证明安全。本轮未完成这条安全链审计。可执行的首版方案是沿Cognee现有 owner+dataset 隔离，给每组映射独立AGE graph/schema及恰当数据库权限，不把跨租户共享图RLS作为未经验证的前提。仍要验证用户授权、graph命名不可注入、连接池复用时的权限、跨dataset访问；分graph不等于一个拥有所有schema权限的SQL连接自动受租户隔离。
-
-### 案例5：批量CSV导入可能正因RLS打开而被拒绝
-
-为了迁入旧图，有人计划直接把百万条边CSV交给AGE文件loader。1.7/1.8的loader检测到目标表启用RLS时明确报错，并提示使用Cypher CREATE。[拒绝分支](https://github.com/apache/age/blob/e1467f12e0b1d15dd35d3ab93f057a7112d425b8/src/backend/utils/load/age_load.c#L178)。
-
-这不妨碍正常Cognee通过add_nodes/add_edges的批量Cypher写入；影响的是额外迁移/离线大导入方案。替代是受控UNWIND批次，通过相同身份、来源及事务规则写入；预算需计批次、索引维护和失败恢复。不能为了“跑快”无声关闭RLS，亦不能把普通参数写入已支持等同文件loader已兼容。
-
-### 5.1 案例6：为什么节点、边都有，还需要唯一性设计
-
-**不是 PG 不支持唯一约束，而是 AGE 默认约束的对象，不是 Cognee 的业务身份。**AGE 用内部 `graphid` 标识图对象，Cognee 用 DataPoint UUID 标识节点、用 `(source UUID, target UUID, relationship_name)` 标识业务边。适配器必须把后两种身份变成明确的存储约束。[Cognee身份合同](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/graph_db_interface.py#L35)、[AGE内部列定义](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/commands/label_commands.c#L566)。
-
-| 层次 | 数据库已提供什么 | 没有自动提供什么 | 不补齐的结果 |
-|---|---|---|---|
-| AGE内部节点ID | 每个图节点有自己的graphid，默认生成规则和相应内部键 | `properties.id`中的Cognee UUID全图唯一 | graphid不同的两个节点可以有同一个UUID；向量只命中一个业务UUID，图中却对应多个对象 |
-| AGE内部边ID | 每条边有内部ID，允许正常的平行边 | 同一有向端点＋关系名只能一条业务边 | 重复入图可能增加关系数量；反馈寻址、来源归属和删除单位不再符合Cognee合同 |
-| 普通MERGE | 按给定模式匹配，未匹配才创建；有单语句内重复路径处理 | 自动建立UUID/业务边唯一索引，或把所有并发调用变成原子upsert | 两个会话都没查到同一UUID时，不能只靠内部ID主键排除业务重复 |
-| PG唯一索引 | AGE写入会经过PG约束/索引检查；能拒绝重复键 | 自动决定业务键、跨label作用域、冲突后让请求成功 | 约束建对可阻止重复，但冲突请求仍可能失败，需要恢复事务和重新匹配 |
-
-例如以下两条存储记录的内部 ID 不同，AGE 内部主键并不冲突：
-
-| AGE内部graphid（示意） | properties.id | properties.name |
-|---|---|---|
-| 101 | U-123 | 旧名称 |
-| 102 | U-123 | 新名称 |
-
-对 AGE，这是两个合法节点；对 Cognee，这是同一个业务节点被复制。后续 `get_node(U-123)`、按ID反馈更新或删除究竟影响一个还是多个，取决于查询写法，已经失去接口期望的单一对象语义。这是数据正确性问题，不只是多占一点空间。
-
-**源码怎样证明这一点：**AGE1.6/1.8 的 MERGE 都有执行节点私有的 `created_paths_list`，它处理本次执行中的重复，不是跨数据库进程共享的业务键锁；最终使用普通 `table_tuple_insert` 和 `ExecInsertIndexTuples`。它不是 SQL `INSERT ... ON CONFLICT`，没有在唯一冲突后自动切换为匹配并重试。[1.8匹配→创建路径](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/executor/cypher_merge.c#L693)、[普通插入及约束检查](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/executor/cypher_utils.c#L370)；1.6对应源码见[专项证据](evidence/age-business-uniqueness-impact.md)。因此“两会话都匹配不到，然后各自插入”的风险是执行路径推导；本次没有把它冒充并发实测结果。
-
-**PG 的约束能力确实可用，但索引必须建对。**两版 AGE 回归都创建过整个 `properties` 列的 UNIQUE 索引，并预期 Cypher 写入重复时抛 duplicate key；普通属性表达式索引也有回归。但是 `{id:U,name:A}` 和 `{id:U,name:B}` 是两个不同map，对整个map建UNIQUE仍允许相同UUID。业务适配应约束UUID提取表达式，而不是照搬整个map索引。[唯一索引回归](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/regress/sql/index.sql#L35)、[属性表达式索引回归](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/regress/sql/index.sql#L263)。本轮未找到UUID表达式UNIQUE的现成上游专项回归；具体DDL需在目标组合执行验证。[PG表达式唯一索引机制](https://www.postgresql.org/docs/18/indexes-expressional.html)。
-
-| 必须完成的设计 | 建议实现及依据 | 验收结果 | 原工作包是否已包含 |
-|---|---|---|---|
-| 节点业务键 | 每dataset graph使用统一业务节点label；对规范化UUID属性建唯一表达式索引，并限制必填、类型和身份变更 | 相同UUID不同name仍只有一个节点；缺失/null不绕过规则 | **W2/W3已含** |
-| 唯一范围 | 统一label使约束落在同一张表；若按type分label，需另做全图身份登记协议 | 相同UUID不能因写到不同type label而重复 | 基础统一label方案已含；额外登记方案需按选型细化 |
-| 业务边键 | 每关系类型单独label时约束内部端点组合；统一边label时加关系名表达式；必须先保证UUID→graphid唯一 | 同三元组重复/并发写只有一条边；不同类型和反向边仍分别保留 | **W2/W3已含** |
-| 匹配模式 | MERGE只使用稳定身份；name、时间戳等可变字段另SET | 改名称是更新，不是匹配失败后新建；不能靠无限重试修复错误匹配条件 | **W2已含** |
-| 并发失败恢复 | 唯一冲突后回滚受影响事务/受控savepoint，按正确快照重新匹配；识别永久非法输入、设置重试上限 | 不产生重复；可恢复竞争按同一对象完成，永久错误明确失败 | **W2/W7已含** |
-
-两项边界不能省略：① AGE label使用PG表继承，父表上的UNIQUE并不约束所有子表，不能只在 `_ag_label_vertex` 建索引就声称全图唯一；② 1.8 的 ON CREATE/ON MATCH 只决定匹配/创建后的更新分支，**不会自动创建业务索引或处理并发唯一冲突**。[AGE继承构造](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/commands/label_commands.c#L407)、[PG继承限制](https://www.postgresql.org/docs/18/ddl-inherit.html#DDL-INHERIT-CAVEATS)、[PG事务重试要求](https://www.postgresql.org/docs/18/mvcc-serialization-failure-handling.html)。
-
-这项工作也不是 AGE 特有的“无端加设计”：Cognee 的 Neo4j adapter 初始化时已创建公共 `__Node__.id` 唯一约束；PG demo 用节点 `id` 主键、边三元组复合主键及对应 ON CONFLICT。新后端需要保留的是同一个业务合同。[Neo4j初始化](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L213)、[PG表定义](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/tables.py#L27)。AGE允许平行边是正常图能力；Cognee选择三元组幂等，才需要收紧这一默认自由度。
-
-### 案例7：APOC标签替换不能只删一行
-
-Neo4j写张三时先合并公共__Node__身份，再追加Entity标签。AGE1.8节点pattern的label_opt只有单个 `:label_name`，不能机械复制 `:__Node__:Entity`及动态追加标签语义。[AGE节点产生式](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/parser/cypher_gram.y#L1418)、[单标签产生式](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/parser/cypher_gram.y#L1530)。
-
-固定CogneeNode + type属性可支撑标准API按类型筛选，但旧raw Cypher `MATCH (:Entity)`要改为查属性。若同一显式UUID先后写成不同模型，Neo4j会积累旧标签而type属性只保留当前类型；用单个type字符串不会自动保留旧标签集合。应明确禁止跨类型复用UUID，或保留labels数组并改所有相关查询。文档应把这个决定写进兼容范围，而不能说“删除APOC后标签完全等价”。[Neo4j批量写](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L382)。
-
-### 5.2 已有原语，还会出现哪些“成功但错误”的结果
-
-
-| 底层已有，但仍要补的业务合同 | 不补的具体错误 | 基础估算 |
-|---|---|---|
-| UNWIND＋批量写 | 批内重复属性合并不正确、事务失败只重试部分批次导致状态不完整 | W2/W7已含 |
-| SET/REMOVE＋字段所有权 | 重新cognify把feedback重置0.5、清除valid_to或覆盖truth状态 | W4/W5已含 |
-| 列表操作＋来源集合更新 | 并发新增来源互相覆盖；forget可能把仍有其他来源的数据误判为可删除 | W4已含 |
-| DETACH DELETE＋来源删除规划 | 一份文档删除时连同共享实体/边一起删掉 | W4已含；不能绕过现有planner |
-| 参数能力＋协议/codec | UUID/类型/结果shape错配；动态关系类型拼接不正确 | W2已含 |
-| VLE＋邻域合同 | 路径结果漏孤立seed、漏诱导边或重复展开；排序上下文与原后端不同 | W6已含；性能验收在W7 |
-| PG事务＋graph/vector分开写 | 图写成功后向量写失败，或后续边/批次失败，需要来源驱动的补偿恢复 | W4/W7已含；不提供跨adapter原子事务 |
-
-例如A、B同时追加来源，都读到旧列表[]，分别写[A]和[B]，最后[B]覆盖[A]；之后删B可能把A仍支持的事实误判成无来源。列表能存不等于集合合并原子，必须把读改写纳入事务/整操作锁或可验证的原子更新。
-
-邻域也不是随便返回几条路径：若张三这个seed没有任何边，仍应保留张三；若找到张三、李四、星河三个节点，李四—星河也应按合同成为诱导边，即使它不在选出的那条路径上。只把VLE路径边打包会漏事实。前者会让用户搜到实体却看不见实体，后者让回答上下文缺少已有关系。
-
-同一查询用UNWIND一次送100条，不代表100条各自成功：需要定义整个批次的事务边界、重复输入合并和失败重试。UUID或agtype解码错误则会造成“向量召回有结果，图按ID找不到”，即使数据库本身保存了节点。
-
-
 <a id="apoc-gds"></a>
-## 6. 用同一份项目资料拆开3种APOC、7种GDS
-
-APOC是Neo4j的扩展函数/过程库，GDS是其图分析库。这里没有要求AGE复刻整套库，而是逐项替代Cognee实际使用的业务行为。以下业务数据是教学例子，执行位置来自代码；示例抽图不冒充LLM实际输出。
-
 <a id="dependency-impact"></a>
-### 先按用户后果决定优先级：写入、摘要、结构分析分开验收
+## 3. 写入缺什么：三种写入行为、业务身份和来源一致性必须补齐
 
-**APOC三项行为参与正常图写入，迁移时必须有等价实现；本章七种GDS调用集中在图统计路径，不能与写入阻断归为同一优先级。**“不能直接支持整个Cognee”也不等于“普通会话必须装GDS才能工作”。
+**本章结论：AGE能存节点和边，但不会自动执行Cognee的业务规则。正常入图前必须补齐分组、类型、关系、唯一性和来源维护；缺失时会导致写入失败，或更隐蔽的“成功但数据不对”。**
 
-这里的“不支持”要分清：**保留原Neo4j查询但目标没有对应过程**会报错；**新adapter不用这些过程、却实现了同样的业务结果**，属于另一种实现，不应判成功能缺失。Ladybug已有独立写入实现；AGE需要开发自己的adapter，而不是安装Neo4j的APOC/GDS。
+### 3.1 资料怎样进入图：Claude Code聊天也可能触发，但分两步
 
-| 验收时点与优先级 | 必须解决的行为 | 不解决的实际影响 | 能否推迟 |
-|---|---|---|---|
-| **正常入图上线前必需** | APOC对应的分组并集、模型类型、动态关系匹配/创建；连同身份与并发规则一起验收 | 保留原调用会使节点/批量边写入失败；直接删调用可能变成能运行但丢分组、类型或关系 | **不能在宣称正常入图可用时推迟**；可改用其他实现，不必保留APOC名称 |
-| **启用图摘要前必需** | 准确节点/边计数、统计异常与真实空图区分；解除计数对重型统计的耦合 | 现摘要入口在GDS统计异常时返回0节点/0边，不缓存成功值，下次可能继续失败；用户会误以为记忆库为空 | 纯会话应用可以暂不接摘要入口；若已展示计数，不能用假0掩盖缺失 |
-| **启用连通性分析前必需** | WCC：连通分量数量及大小 | 无法判断图分成几个互不连通的知识团体、每团多大；这些指标失效，不等于普通关系检索失效 | 可晚于会话功能；需关闭该分析或修改返回/消费合同明确不可用。当前`include_optional=False`仍算WCC，不能仅靠此开关跳过 |
-| **业务需要时选配** | 全图最短路径统计、平均聚类系数 | 无法提供直径/平均最短距离/邻居连接紧密程度；现代码只在`include_optional=True`时调用 | 可以单独排期和压测；普通Claude Code记忆功能不以此为上线门槛 |
+假设输入是“张三参与星河项目”，抽取结果最终识别出张三、星河及参与关系。下面是教学数据，不保证每次模型抽取都生成完全相同结果。
 
-**为什么“APOC必须改”不是“必须开发APOC库”？**必须交付的是写入后的正确数据：张三仍保留两个内容分组、文档和实体仍可按类型找到、“参与”和“维护”关系仍准确存在。换数据库后，这些行为可以用原生查询、类型字段或受事务保护的集合操作实现。缺GDS时，普通问答所需节点/关系已经存在；缺这些写入行为时，新知识本身就没有正确进入图。这是两类缺口优先级不同的原因。
+只连接Cognee的模型上下文协议（**MCP**，让Claude Code调用外部工具的协议）时，必须实际调用`remember`才写入；安装Cognee记忆插件后，则由事件钩子（hooks）自动采集。
 
-本章的GDS结论针对固定源码的七种调用和常规内置链路；显式raw Cypher、自定义Task或外部插件主动执行`gds.*`，需按自己的调用链另行验收。来源追踪、反馈、truth等图接口也是独立合同，不能因为不依赖GDS就省略。
+```mermaid
+flowchart TD
+    A[Claude Code问题、工具轨迹、回答] --> B[插件采集到会话存储]
+    B --> C{满足同步条件}
+    C --> D[improve：处理新增会话内容]
+    D --> E[add加cognify：接收资料并抽取知识]
+    F[显式导入项目文档] --> E
+    E --> G[AGE适配器写节点、关系、来源]
+    E --> V[建立向量索引]
+    B -.可先从会话中找回.-> R[后续recall检索]
+    G --> R
+    V --> R
+```
 
+插件通过`/remember/entry`保存有类型的会话记录，不直接走字符串`remember`输入的自动构图分支；后续由插件同步触发`improve`。这里`remember`是保存入口，`cognify`负责构建知识图，`improve`负责持久化/提炼会话及其他学习阶段，`recall`是读取记忆。**会话保存成功不等于永久图已构建完成**：图写失败时会话仍可能存在，持久化水位不会按成功推进，后续可重试。[会话转图][session-cognify]。
 
+插件1.6.1的自动同步默认是：每10秒检查，空闲60秒后尝试；每150个已存储工具/回答结束事件也可触发；自动触发共用1800秒冷却及新增记录检查；会话结束另有最终同步。它不是每分钟无条件重导全部聊天。采集受开关、过滤和后端可用性约束，也不等于扫描全部项目文件。[插件钩子][plugin-hooks]、[同步条件][plugin-sync]。
 
-### 先把文档摆出来：哪些数据真的交给了数据库？
+因此，即使用户没有手动点击“导入”，插件后续同步也会进入图写入阶段；**下面的写入缺口会在这个阶段暴露，而不是仅影响某个管理页面。**
 
-假设同一个 dataset、同一个图里导入两份文档：
+### 3.2 APOC为什么必须替代：它参与了普通写入
 
-> 文档 A《星河项目启动纪要》：张三和李四互相协作，共同参与星河项目。
->
-> 文档 B《项目交接记录》：张三、李四继续参与星河项目，赵六负责维护。王五负责海风项目。
+**APOC（Neo4j的扩展函数与过程库）**在当前适配器中承担三项具体工作。AGE不提供这些同名调用，但可以用自己的写法实现结果；“必须改”指必须替代业务行为，不是重建整套APOC库。
 
-为了追踪来源分组，假定送到 adapter 的节点还带有同一图内的集合归属：A 的相关节点属于“项目启动”，B 的相关节点属于“运维交接”。这里演示 `belongs_to_set` 的合并，**不是把两个隔离 dataset 强行共享成一个图，也不把集合标签当作访问权限**。集合名使用可读简称。
+假设同一数据集（dataset，一个有访问权限边界的知识空间）内有两份文档：A《项目启动》与B《运维交接》，都提到“张三参与星河”。假设上游已将张三、星河及两份文档中的这条关系映射为相同业务身份；名字相同本身不保证实体合并。
 
-上游先解析文档、抽取实体和关系，再把结构化节点/边交给存储 task。APOC 收到的是这些已经整理好的数据。假定两份文档里的“张三”被识别为同一个实体，业务 ID 一样；下面 `U_张三` 等是 UUID 的阅读缩写，不是可直接执行的真实 UUID。[实体模型](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/engine/models/Entity.py#L5)、[存储入口](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/add_data_points.py#L250)。
+| APOC调用 | 输入与应该得到的结果 | 不改写会怎样 | 只删调用会怎样 | AGE怎么替代 |
+|---|---|---|---|---|
+| `apoc.coll.toSet` | 原分组`[项目启动]`加新分组`[运维交接]`，得到两者并集；重复输入不重复 | 节点写语句引用不存在的函数而失败，分组为空也不绕过该引用 | 直接覆盖会丢旧分组；仅拼接会重复；仅对本批去重会漏库内旧值 | 在并发控制下合并旧、新列表并去重 |
+| `apoc.create.addLabels` | 张三标为`Entity`，文档标为`TextDocument`，使后续可按模型类型查找 | 同一节点写语句失败 | 按UUID能找到对象，按模型类型却漏查；文档子图和类型筛选可能不完整 | 用固定物理标签加类型属性/标签集合，并同步修改所有类型筛选 |
+| `apoc.merge.relationship` | 已有“张三参与星河”则更新；没有则创建；“维护”应是另一种关系 | 非空批量边写入失败，知识关系未完整建立 | 跳过会缺边；无条件创建会重复；忽略类型会把参与和维护混在一起 | 按受控关系类型分组，用匹配或创建、属性更新及唯一性规则写入 |
 
-| 实体 | 业务ID缩写 | 在两份文档中出现的情况 |
-|---|---|---|
-| 张三 | U_张三 | A、B均出现，应当复用同一个节点 |
-| 李四 | U_李四 | A、B均出现，应当复用同一个节点 |
-| 星河项目 | U_星河 | A、B均出现，应当复用同一个节点 |
-| 赵六 | U_赵六 | B新增 |
-| 王五 | U_王五 | B新增 |
-| 海风项目 | U_海风 | B新增 |
-
-为便于阅读，抽取后的关系采用下列示意名称；实际 LLM 输出不保证使用相同命名：
-
-| 起点 | 关系类型 | 终点 | 业务含义 |
-|---|---|---|---|
-| 张三 | COLLABORATES_WITH | 李四 | 张三与李四协作 |
-| 张三 | PARTICIPATES_IN | 星河项目 | 张三参与星河 |
-| 李四 | PARTICIPATES_IN | 星河项目 | 李四参与星河 |
-| 赵六 | MAINTAINS | 星河项目 | 赵六维护星河 |
-| 王五 | LEADS | 海风项目 | 王五负责海风 |
+依据：[节点写入][node-write]、[批量边写入][edge-write]。`toSet`只给分组列表去重，**不是识别两个“张三”是不是同一个人，也不是记录文档来源的账本**。模型标签`Entity`也不是“人物”这个语义类别，后者可通过类型节点表达。
 
 ```mermaid
 flowchart LR
-    Z[张三] -->|协作| L[李四]
-    Z -->|参与| X[星河项目]
-    L -->|参与| X
-    Q[赵六] -->|维护| X
-    W[王五] -->|负责| H[海风项目]
+    A[文档A：项目启动] --> O[已有张三节点]
+    B[文档B：运维交接] --> U[更新同一个张三]
+    O --> U
+    U --> S[保留两个分组]
+    U --> T[保留模型类型]
+    U --> E[匹配或创建参与关系]
 ```
 
-**图上的圆点/方框是节点，连线是关系。**属性是节点或关系随身携带的数据，例如名字、描述、阶段。真实 Cognee 图还会有文档、文本块、EntityType、NodeSet 等节点；上图只展示六个业务实体。后文统计数字也只针对这张简化教学图，不能当作完整 Cognee 图的实际返回值。
+新适配器须同时完成写入和查询映射。例如把物理`Entity`标签改成`type=Entity`属性后，仍使用旧的标签查询就会漏数据；同一UUID是否允许积累多种模型类型，也必须明确，单个type值不自动等价于多标签。
 
-### 第一种 APOC：`apoc.coll.toSet`——张三出现两次，集合归属怎样保留？
+**失败不是全部自动回滚。**当前顺序是图节点→节点向量→图边→边向量，分阶段执行。若节点已成功、边写失败，前面的数据可能已存在；框架尝试应用层补偿，但它不是跨所有存储的一次原子事务。仍能从旧图、会话或部分向量中回答，不证明这次导入成功。[写入顺序][storage-order]、[错误与补偿][pipeline-errors]。
 
-先导入 A，数据库已经存着：
+也不应夸大为所有操作都失败：单条边写入已有普通匹配或创建实现，普通节点删除也不用这三项APOC。结论限定为**当前常规节点/批量边写入必须有等价实现**。[单边写入][single-edge]。
 
-```text
-张三节点：
-  id = U_张三
-  belongs_to_set = [项目启动]
+### 3.3 为什么有节点主键，还需要业务唯一性
+
+AGE的内部节点编号解决“物理记录各不相同”；Cognee的UUID解决“重复导入的张三应是同一个业务对象”。如果两个请求同时创建相同UUID，却各得一个内部编号，底层记录仍合法，业务上却已经重复。
+
+```mermaid
+flowchart LR
+    A[请求甲：写入张三UUID] --> C{业务唯一约束和冲突处理}
+    B[请求乙：同一张三UUID] --> C
+    C -->|正确| D[一个张三节点，属性按规则合并]
+    C -->|缺失时可能| E[两个节点，知识关系分散]
 ```
 
-再导入 B，传给 `add_nodes` 的张三节点带着：
+因此要设计并验证业务UUID索引、边的稳定身份、并发冲突重试。不能假定父标签上的唯一索引自动覆盖所有继承标签；约束必须覆盖模型实际存储范围。边身份至少区分起点、关系类型和终点；同端点“参与”和“维护”不能误合并。单条`MERGE`（匹配已有对象，否则创建）成功不等于所有并发都已唯一。[身份及索引依据][age18-evidence]、[业务写入合同][graph-interface]。
 
-```text
-本次输入：
-  id = U_张三
-  belongs_to_set = [运维交接]
+### 3.4 来源维护：删除A，为什么必须保留B的知识
+
+分组表达“属于哪些内容集合”，来源表达“由哪些输入支持”，学习状态表达“后来学到了什么”。三者必须分开保存。
+
+```mermaid
+flowchart LR
+    A[文档A] --> F[张三参与星河：来源A和B]
+    B[文档B] --> F
+    F --> D[撤回A]
+    D --> K[事实保留：仍有来源B]
+    K --> L[再撤回B]
+    L --> J[逐对象检查剩余来源]
+    J --> N[只清理确实无其他来源的对象和索引]
 ```
 
-Cognee 希望更新后的同一个张三节点属于两个集合。如果直接把新列表覆盖进去，就只剩“运维交接”，旧归属丢了。实际 Neo4j adapter 先按 UUID 找到节点，再把旧列表和新列表拼起来，调用 `apoc.coll.toSet` 去重：
+若简单执行“删除张三节点”，B支持的事实也会消失；若只删图而不正确清理向量，可能留下仍能召回的残留。节点还可能被文档C引用，所以删最后一条边来源也不等于整个人物都能删除。
 
-| 写入次数 | 数据库旧值 | 本次输入 | 合并去重后的值 |
+现有删除规划会区分存活与无主对象，清理应删向量，只给存活对象移除目标来源，再删除无主图对象；无主对象在真正删除前保留来源信息，方便失败后找回重试。新适配器需要实现15项来源/元数据方法，复用该规划，而不是另写一个粗暴删节点流程。[来源删除规划][delete-planner]。
+
+并发也要验证：甲读到来源`[B]`准备追加为`[A,B]`，乙同时读到`[B]`准备撤回为`[]`；若乙最后覆盖，会丢A。问题是读、修改、写入没有被完整协调，不是AGE不会存列表。需用事务、锁或条件更新保护整组业务动作；图与向量跨连接的补偿仍要保留。
+
+**这一章的交付门槛：重复写不重复、分组不丢、类型可查、关系完整、删除A不伤及B、失败可重试。任何一项没完成，都不能声称正常入图已经可靠；这些优先于图统计。**
+
+<a id="retrieval-learning"></a>
+## 4. 检索和学习缺什么：图查询原语还要变成正确的业务结果
+
+**本章结论：AGE已有邻域、路径和属性更新基础；需要开发结果转换和状态规则。最短路语法、学习接口和性能是三个独立问题，不能用“支持Cypher”一笔带过。**
+
+### 4.1 查询能跑，为什么还可能漏知识
+
+用户问“星河项目有哪些参与者”，默认混合检索先用向量找候选，再取候选附近的关系。这里不要求运行全图算法，但要求返回正确的节点集合、边方向和过滤结果。
+
+```mermaid
+flowchart LR
+    Z[张三：候选] --> X[星河]
+    Z --> L[李四]
+    L --> X
+    W[王五：另一个孤立候选]
+```
+
+若结果只收集从张三出发的某条路径，可能漏掉节点集合中已有的“李四→星河”边；若只从边反推节点，孤立候选王五可能消失。Cognee需要的是符合范围的节点及节点间相关边，不是任意一个路径列表。[图读取合同][graph-interface]、[子图消费][cognee-graph]。
+
+AGE适配器须处理：候选节点保留、指定深度、方向、关系类型、内容分组筛选、分页和稳定UUID返回。缺失时用户看到的是漏检、错误上下文或读全图造成的延迟，不只是某个统计数字缺失。
+
+### 4.2 学习与时间功能：分别在哪个操作暴露缺口
+
+| 用户行为或流程 | 需要适配什么 | 不支持时的具体影响 | 必须怎样处理 |
 |---|---|---|---|
-| A首次导入 | 空 | `[项目启动]` | `[项目启动]` |
-| B随后导入 | `[项目启动]` | `[运维交接]` | `[项目启动, 运维交接]` |
-| B重复导入 | `[项目启动, 运维交接]` | `[运维交接]` | `[项目启动, 运维交接]` |
+| 用户反馈“这条回答不好”，后续`improve`应用反馈 | 节点/具体边权重的4个读写方法 | 该图权重学习阶段被能力检查跳过或报告错误；会话里的反馈文本不因此消失 | 实现权重读写与完整读算写并发规则，不能只把能力标志改为真 |
+| 显式启用`truth`学习阶段 | 经验对齐坐标和对应版本的2个方法 | 无法提供这套可选重排信号；普通基础检索仍可运行 | 先写新版本坐标，再发布对应质心；读取只采用当前生效版本的坐标，逐项写入结果须真实；它不是事实真伪鉴定 |
+| 给旧事实写失效时间 | 通用`update_node`局部更新 | 旧事实没有按要求标记失效 | 只更新指定字段，保留其他状态；缺失时要明确失败 |
+| 重新导入已有实体 | 保留或明确重置学习状态 | 输入默认权重0.5可能覆盖已经学到的0.9 | 区分新建默认值、普通更新、显式重置。AGE1.8语法只能帮忙分支，不能替你决定规则 |
+| 时间检索“张三上周参与什么” | `collect_time_ids`、`collect_events`两个额外方法 | 时间检索不能只因保存了时间属性就成立 | 按当前毫秒时间、区间边界和事件邻域合同实现 |
 
-这就是 `coll.toSet` 在本项目里的用途：**维护一个节点的集合归属并集**。按 UUID 找到同一个节点是前面的 MERGE 和业务身份约束负责的；这个函数本身只是对列表去重。[实际写入代码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L382)。
+依据：[反馈能力检查][capabilities]、[权重更新][feedback-task]、[事实关闭][close-node]、[时间检索调用][temporal]。
 
-**如果换 AGE：**原样执行 `apoc.coll.toSet` 会失败，整个节点写入语句不能完成。替代方案是由 AGE adapter 实现同样的“旧集合＋新集合→去重集合”，并在事务/并发控制下写回。只对本批输入调用一次 Python `set`，既没有合并数据库旧值，也没有解决同时更新覆盖的问题。该工作已含在基础适配 W2/W4。
-
-### 第二种 APOC：`apoc.create.addLabels`——数据库怎样知道这个节点是实体还是文档？
-
-Cognee 会存储多种对象。下表中的“标签”是数据库节点的分类，和上面的“集合归属”是两回事：
-
-| 输入对象 | Cognee模型类型 | Neo4j先创建/匹配 | APOC追加标签后 |
-|---|---|---|---|
-| 张三 | Entity | `__Node__` | `__Node__`＋`Entity` |
-| 星河项目 | Entity | `__Node__` | `__Node__`＋`Entity` |
-| 文档A | TextDocument | `__Node__` | `__Node__`＋`TextDocument` |
-
-`__Node__` 是这些对象共有的基础标签，便于按统一业务 ID 查找；`Entity`、`TextDocument` 则区分对象类别。adapter 从输入对象的模型类型取得标签名，再调用 `apoc.create.addLabels` 加上它。[标签来源与调用](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L412)。
-
-例如数据库可以按 `Entity` 标签筛选实体，按 `TextDocument` 筛选文档。还要分清：**“张三是人物”并不意味着这里自动追加 `Person` 标签。**当前实体模型可以用 `is_a` 关联一个表示“人物”的 EntityType；模型类别 `Entity`、语义类别“人物”、集合归属“运维交接”是三个不同概念。[Entity.is_a](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/engine/models/Entity.py#L5)、[EntityType模型](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/engine/models/EntityType.py#L4)。
-
-**如果换 AGE：**可以把业务节点统一存入一个 AGE label，并用属性保存 `type` 或所需 `labels` 集合，再由 adapter 把类型筛选转换成属性筛选。需要同时改读和写；只删掉 `addLabels` 会让旧的按标签查询漏数据。Neo4j 原逻辑还会积累标签，若要保留这一行为，单个最新 `type` 属性不够。内置接口映射计入基础适配；用户自己写的 `MATCH (:Entity)` 等原始 Cypher 另行迁移。
-
-### 第三种 APOC：`apoc.merge.relationship`——同一批里有“参与”“维护”“负责”，边怎样写？
-
-节点写好后，`add_edges` 接收一批关系。它先按业务 ID 找到两端节点，再把本条输入的关系类型交给 `apoc.merge.relationship`：
-
-```text
-输入1：U_张三 --PARTICIPATES_IN--> U_星河，属性 {阶段: 启动}
-输入2：U_赵六 --MAINTAINS-------> U_星河，属性 {阶段: 交接}
-输入3：U_王五 --LEADS----------> U_海风
+```mermaid
+flowchart LR
+    A[第一次写张三] --> B[初始化反馈权重0.5]
+    B --> C[反馈学习后为0.9]
+    C --> D[再次导入张三]
+    D -->|只覆盖默认属性：错误| E[退回0.5，学习丢失]
+    D -->|按字段规则更新：正确| F[更新资料内容，保留0.9]
 ```
 
-这个过程的作用是：**按本条输入指定的关系类型，在已经找到的两个端点之间匹配或创建关系。**随后 adapter 用 SET 更新关系属性，所以重复导入也能把“阶段：启动”更新成“阶段：交接”，并保留首次创建时间。[批量边写入代码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L1238)。
+现有普通PG图适配器的“部分支持”主要指缺少上述4个反馈方法、2个truth方法和通用局部更新；不是PG存不了数值，也不是整个`improve`都不可用。会话持久化、经验蒸馏和默认三元组索引等仍有实现路径。AGE适配器要逐项实现和声明，不能照搬一个笼统的“支持improve”。九阶段清单见文末。
 
-| 本次输入 | 原有关系 | 希望得到的结果 |
-|---|---|---|
-| 张三→星河，参与，阶段=启动 | 无 | 新建一条“参与”关系 |
-| 张三→星河，参与，阶段=交接 | 已有同一业务关系 | 更新属性，仍是一条关系 |
-| 张三→星河，维护 | 只有“参与”关系 | 新建不同类型的“维护”关系，不能误当成原来的“参与” |
+### 4.3 最短路与自定义查询：不能承诺原样兼容
 
-这里说的是 Cognee 要求的结果；并发情况下仍需要业务唯一性和冲突处理。不能因为函数名里有 merge，就省掉这些规则。
+假设张三直达赵六是1跳但费用100，经李四是2跳、费用2。AGE1.8所核查的专用最短路按跳数选1跳，不能当作按费用选2跳的算法。
 
-**如果换 AGE：**adapter 可以先按关系类型分组，再分别执行固定类型的 MATCH＋MERGE＋SET 模板：一组写参与，一组写维护，一组写负责。节点 ID 和属性作为参数传入，类型名要验证并正确引用。Cognee 的 Neo4j单边方法已经使用普通MERGE而没有APOC，可帮助理解这个过程主要封装了什么。[单边写入](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L1153)。
+```mermaid
+flowchart LR
+    Z[张三] -->|费用100| Q[赵六]
+    Z -->|费用1| L[李四]
+    L -->|费用1| Q
+```
 
-若不替代这个过程，边写入会失败；此前写入的节点和节点向量可能已存在，因此会留下需要回滚/补偿的中间状态。关系越多、类型越多，分组批次和索引查找成本越需要验证。基础改造计入 W2/W3。
+这不构成当前普通邻域问答的硬缺口；当前Cognee相关全图距离统计也没有配置权重。但是用户显式提交Neo4j原始查询、或自然语言生成器仍生成Neo4j语法时，会碰到方言不兼容。应先限制公开查询范围，再改生成提示、参数和结果协议，不承诺任意查询可迁移。[AGE最短路实现][age-path-code]、[自然语言查询入口][nl-retriever]。
 
-### APOC不改、只删、正确替代：三种后果不能混写
+<a id="age-performance"></a>
+### 4.4 AGE能否解决联表慢：可能改善表达，性能收益待测
 
-| 调用与所在写入步骤 | 保留原调用、不做适配 | 只删调用或草率替代 | 必须证明的正确结果 |
-|---|---|---|---|
-| `apoc.coll.toSet`：`add_node/add_nodes` | 目标不识别函数，节点写入语句失败；即使本次分组为空，原查询仍无条件引用它 | 直接覆盖会把张三的`[项目启动]`变成`[运维交接]`；只拼接不去重会积累重复分组；只对本批去重没有合并库内旧值 | A/B分组均保留，重复写不重复，并发更新不覆盖。它去重分组数组，不负责实体消歧，也不是来源账本 |
-| `apoc.create.addLabels`：同一节点写入语句 | 目标不识别过程，节点写入不能正常完成 | 删调用却保留按`Entity/TextDocument`标签筛选的读代码，按UUID可能查到节点、按模型类型却漏查；文档子图等相关路径结果不完整 | 新类型存储与全部内置类型筛选一起映射；若保留多标签语义，不能只留最后一个type值 |
-| `apoc.merge.relationship`：非空批量`add_edges` | 节点成功后，批量边查询仍失败，无法完成本批关系写入 | 跳过边写入会留下节点但缺关系上下文；改成无条件CREATE会在重试时重复；忽略关系类型会混淆“参与”和“维护” | 同端点同业务关系重复写保持幂等，不同方向/类型保留，属性更新正确，并发唯一性经验证 |
+固定跳图匹配仍会转换成PG内部查询，仍可能使用联表（JOIN，把关联记录组合起来）；变长路径展开（**VLE**，沿关系扩展不同长度路径）有专门实现，但仍受扇出、深度、冷缓存和数据量影响。[查询转换][age-transform]、[路径实现][age-path-code]。
 
-依据：节点语句[328行](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L328)、[批量384行](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L384)、[批量关系1241行](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L1241)。上述“只删”后果是根据代码构造的失败情景，并非本轮已运行的AGE实验。
+“从张三找两跳关系”和“从高连接度节点找十跳所有路径”不是同一负载。第二种即使没有手写复杂SQL，也可能产生大量中间结果。不能把AGE当成消除关系运算或自动提速的开关。
 
-**失败会怎样传到用户？**Neo4j的`query()`记录数据库异常后重抛，存储task不会把缺过程当作可选功能跳过；pipeline会走失败记录与回滚/补偿路径。因此用户可能先收到后台任务已启动，再看到cognify运行失败；不能把启动成功当成资料已完整入图。[异常重抛](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L245)、[pipeline错误与补偿](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/pipelines/operations/run_tasks.py#L292)。
+100用户同样要区分100个独立图与一个共享热点图。连接池、图缓存和同图写冲突都要测；AGE也不自动把一个图分布到多台机器。验证至少记录第95百分位响应时间（**P95**，即95%的请求在该时间内完成）、错误率、内存、冷热差异和写入等待，并把数据库、向量检索、模型调用分别计时。
 
-**也不能说失败时整个系统自动回到导入前。**存储顺序是图节点→节点向量→图边→边向量，分阶段执行。若节点两项已替代而边过程未替代，节点与节点向量可能已经写入。现有rollback是应用补偿，补偿自身也可能失败；它不是图、向量、关系库的一次原子事务。普通检索仍可能找到旧数据或部分向量内容，但缺少本次完整关系，不能据“还可以回答”判定导入成功。[写入顺序](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/add_data_points.py#L332)。
-
-边界也要保留：单条`add_edge`已有不依赖APOC的MERGE实现；普通删除节点/边语句也不使用这三项APOC。因此本结论是“当前正常批量入图必须替代这些写入行为”，不是“没有APOC则全部读写删除一律失效”。[单边路径](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L1125)、[删除节点](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L575)。
+**这一章的交付门槛：检索结果与参考后端一致，学习不会被重导覆盖，未支持的查询明确限制；性能结论只根据目标数据和负载实验给出。**
 
 <a id="gds-triggers"></a>
-### 图已经写好，什么场景才会调用GDS：按实际入口追踪
+## 5. 统计缺什么：不支持GDS不等于不能记忆，要看谁调用了统计
 
-**本章七种GDS调用集中在Neo4j图统计路径；不是每个session请求、每轮recall或每次improve的固定步骤。**GDS计算的是当前图的结构指标，而普通问答通常只读取候选节点附近的关系。
+**本章结论：GDS（Graph Data Science，Neo4j图数据科学库）在本次核查中用于图统计。普通Claude Code会话采集、检索和默认同步不会固定调用它；但显式摘要请求可能被现有代码间接拖入统计失败。应把计数、连通性和昂贵指标分成三档交付。**
 
-例如问“张三参与哪个项目”，读到`张三→参与→星河`即可组织答案；客户端显式请求“整个知识库有几个互不连通的团体”的结构统计时，才进入这里讨论的WCC路径；不是聊天文本出现这个问题就自动触发GDS。同一个图的关系检索和全图结构分析，可以独立实现、独立失败。
+### 5.1 两条调用路径，影响的人不同
 
-| 实际入口 | 进入GDS的条件 | 不支持GDS时的影响边界 |
+```mermaid
+flowchart TD
+    A[普通会话和记忆操作] --> B[会话存储、入图、邻域检索]
+    B --> C[回答用户]
+    D[管理端显式请求统计摘要] --> E{计数缓存命中}
+    E -->|是| F[直接返回缓存计数]
+    E -->|否，且已有构图记录| G[当前Neo4j调用完整基础统计]
+    G --> H[内存投影和连通性算法]
+    H --> I[统计结果]
+```
+
+当前Claude插件没有默认请求图统计摘要；状态栏刷新是本地渲染。当前MCP的空检索诊断也已移除旧的图摘要探测，不能把“找到3条记忆”的结果计数当成全图统计。本文的管理端场景，指你另外接入统计API的页面、监控脚本或程序。[插件状态栏][plugin-statusline]、[MCP测试][mcp-summary-test]。
+
+| 触发入口 | 何时真正计算 | 不支持相关统计时的影响 |
 |---|---|---|
-| 常规session读取、默认HYBRID/GRAPH_COMPLETION检索 | 正常内置链路没有调用这七个过程 | 不因缺GDS本身失去问答；仍要求图读、身份、类型和关系实现正确 |
-| 正常remember/cognify入图、session-aware improve | 正常内置链路没有附带该图统计调用 | 缺GDS本身不阻断这些流程；APOC对应写入行为及来源/学习接口的缺失会产生另一类影响 |
-| `GET /api/v1/datasets/graph-summary`、`GET /api/v1/visualize/brains-summary` | 客户端主动请求；dataset有对应cognify运行记录且计数缓存未命中；使用Neo4j后端 | 调`get_graph_metrics(False)`失败后，该dataset返回0节点/0边、`computed_at=None`，不缓存成功结果；后续摘要请求可能重试 |
-| 显式`get_graph_metrics(False)` | 直接进入Neo4j基础统计 | 不仅WCC不可得，整个方法也可能异常返回不了计数字典；当前没有逐指标失败隔离 |
-| 显式`get_graph_metrics(True)` | 基础统计后再进入可选算法 | 除基础指标外还依赖全点对距离/聚类；缺相应过程会使该次完整统计失败 |
-| `get_pipeline_run_metrics(...)` | 调用者显式使用，完整metrics缓存未命中；参数由调用方决定 | 统计计算异常，不等于原始cognify任务自动失败；本轮未找到默认session/API自动调用此函数的生产调用点 |
-| 自定义raw Cypher/Task | 自定义代码显式调用`gds.*` | 按该自定义功能处理；不能套用“常规问答不依赖”的结论 |
+| 普通`recall`、会话保存、默认`improve` | 正常内置链路不调用这七项GDS过程 | 不因GDS缺失本身失效；写入和检索适配仍须正确 |
+| `/datasets/graph-summary`、`/visualize/brains-summary` | 主动请求，已有对应构图记录且统计缓存未命中 | 可能触发下面的零计数回退 |
+| 显式`get_graph_metrics(False)` | `False`表示不计算可选指标，仍进入基础统计 | 仍需要内存投影与连通性计算；关闭可选项不等于关闭GDS |
+| 显式`get_graph_metrics(True)` | `True`表示基础统计后追加可选算法 | 最短路径或聚类缺失也可能使整次完整统计失败 |
+| 显式`get_pipeline_run_metrics(...)` | 完整统计缓存未命中时 | 影响此次指标获取；没有证据表明每次构图都会自动调用它 |
 
-依据：[默认HYBRID邻域读取](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/hybrid/entities.py#L60)、[摘要缓存判断](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L170)、[摘要计算/回退](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L83)、[完整metrics缓存](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/metrics/operations/get_pipeline_run_metrics.py#L59)。缓存正常命中后不重算；并发缓存miss仍可能重复计算，不能称严格每run只执行一次。
+依据：[摘要缓存与计算][counts]、[完整指标缓存][pipeline-metrics]、[Neo4j统计顺序][neo-metrics]。并发缓存未命中可能重复计算，不保证严格每次构图只计算一次。
 
-**`include_optional=False`不等于禁用GDS。**当前Neo4j顺序是取图数据→检查/删除旧内存投影→新建投影→WCC；只有全点对最短路径和聚类在`True`时额外执行。因此“我只要节点数，把optional关了”仍不能避开GDS。[完整调用顺序](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2333)。
+### 5.2 七种GDS调用分别干什么，不支持会失去什么
 
-#### Claude Code实例：自动记忆采集与GDS统计不是同一件事
+弱连通分量（**WCC**，忽略箭头后彼此能到达的一组节点）用来判断知识图分成多少个互不连通的部分。GDS内存投影则是算法使用的计算副本，不是另一个用户知识库。[官方投影说明][gds-projection]。
 
-此补充固定外部`cognee-integrations`提交`4d57a36859111b927f08a0b99fe04ccfbc4ed22e`，Claude Code插件`cognee-memory 1.6.1`；不能仅从主仓的MCP说明推断插件行为。
+| GDS调用 | 什么时候调用 | 直接用途 | 缺失后果及替代方式 |
+|---|---|---|---|
+| `gds.graph.list` | 基础统计准备 | 检查旧内存投影是否存在 | 原流程准备失败；AGE新算法可不使用这个目录机制 |
+| `gds.graph.drop` | 旧投影存在时 | 删除旧计算副本 | 原统计可能失败；不是持久图删除失败，替代时只清理临时状态 |
+| `gds.graph.project` | 建立本次统计输入 | 生成算法使用的内存图 | 原算法没输入；AGE可直接查询或完整导出目标拓扑 |
+| `gds.wcc.stats` | 基础统计，`False`也调用 | 算连通分量数量 | 无法得知有几个知识团体；需实现等价算法或不开放该指标 |
+| `gds.wcc.stream` | 同上 | 聚合每个分量的大小 | 无法得知各团体大小；可与上一项一次遍历计算 |
+| `gds.allShortestPaths.stream` | 仅`True` | 获取全图点对距离，再算直径/平均距离 | 缺相应指标，不等于普通邻域检索失败；单独选配 |
+| `gds.localClusteringCoefficient.stats` | 仅`True` | 算邻居之间连接紧密程度 | 缺平均聚类系数，不等于反馈权重或答案评分失效；单独选配 |
 
-只配置MCP是提供工具，须实际调用`remember`才写入。安装并启用记忆插件后，在capture开启且后端可用时（默认开启，仍有筛选/脱敏），hooks会自动采集：提交问题时暂存本地pending prompt并检索记忆；指定工具执行后记录TraceEntry；Stop时把问题和回答配成QAEntry。typed entry经`/remember/entry`写入session存储，不直接落入SDK字符串输入的add+cognify路径。插件随后按条件显式调用`/improve`进行session到图的持久化/提炼。[hooks](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/hooks/hooks.json#L15)、[typed提前返回](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/api/v1/remember/remember.py#L1068)。
+其中前三项是旧算法的准备设施，不是必须复制给AGE的用户功能。后四项才对应具体分析结果。[算法调用代码][neo-metric-utils]。
 
-插件默认每10秒检查空闲、空闲60秒后尝试同步；每150个存储工具/Stop事件也可触发检查，非150轮聊天。自动/空闲共用1800秒冷却和新增记录检查，SessionEnd另有最终同步。因此确有自动写入/处理成本，但不是每轮GDS统计，也不是每分钟无条件重导整份聊天。[空闲阈值](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/idle-watcher.py#L41)、[次数触发](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/_plugin_common.py#L1767)、[冷却](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/_plugin_common.py#L1822)、[真正improve请求](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/_plugin_common.py#L5085)。
-
-**当前客户端没有默认额外请求图统计摘要。**所查Claude插件无`graph-summary/brains-summary/get_graph_metrics`调用；状态栏2秒刷新仅重跑本地renderer，显示的memory hits是本次检索结果。当前Cognee前端虽保留`getDatasetGraphSummary`封装，但未找到调用方；MCP旧的空recall→graph-summary探测已移除，测试明确禁止。这里“请求统计摘要”应理解为另行接入该API的管理页/脚本等条件场景，不能写成现成客户端每轮自动执行。[本地renderer](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/cognee_statusline_render.py#L1)、[MCP移除说明](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee-mcp/src/server_utils.py#L242)、[禁止统计调用的测试](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee-mcp/tests/test_recall_summary.py#L151)。
-
-下面继续使用六个实体的小图。为解释统计，把边的箭头暂时忽略，因为当前 Cognee GDS 投影把关系设置成 `UNDIRECTED`（无向）：
+继续用项目资料画一张仅含六个业务实体的教学图；真实Cognee图还有文档、片段、类型等节点，实际指标不应直接照抄这里的数字。
 
 ```mermaid
 flowchart LR
     Z[张三] --- L[李四]
-    Z --- X[星河项目]
+    Z --- X[星河]
     L --- X
-    X --- Q[赵六]
-    W[王五] --- H[海风项目]
+    Q[赵六] --- X
+    W[王五] --- H[海风]
 ```
 
-可以直观看出左边四个节点相连，右边两个节点相连，两边没有连线。下面逐个拆开七种 GDS 过程。
+- **连通性例子：**这里有两个团体，大小分别为4和2。缺WCC就不能提供这两个结构指标，但仍能查到“王五与海风相连”。
+- **距离例子：**张三到赵六最少2步。全图平均距离却要考虑所有点对；张三到王五不可达，必须明确如何处理，不能简单把它当0。AGE的一次两点最短路调用不等于完成全图统计。
+- **聚类例子：**张三的两个邻居李四和星河也相连，构成三角形；赵六只有一个邻居，局部结构不同。聚类衡量这种连接结构，不是判断“张三参与星河”是真是假。
 
-**过程1：`gds.graph.list`——有没有上一次计算留下的图副本？**
+### 5.3 最容易误判的故障：图里有知识，摘要却显示0
 
-GDS算法使用一份便于计算的内存图，Cognee把它命名为 `myGraph`。原始知识图在数据库中；`myGraph` 是拿来计算的副本，不是另一个用户dataset。
-
-假设上一次只导入了文档A并做过统计，此时目录可能显示：
-
-```text
-已有计算图：[myGraph]
-这份旧副本只认识：张三、李四、星河项目
+```mermaid
+flowchart LR
+    A[星河图实际有节点和边] --> B[摘要请求：缓存未命中]
+    B --> C[当前方法顺便计算WCC]
+    C --> D[缺GDS过程，统计异常]
+    D --> E[摘要层返回0节点、0边，计算时间为空]
+    E --> F[不缓存成功结果，下次可能重试]
 ```
 
-`gds.graph.list` 列出的是这样的计算图目录。Cognee据此判断 `myGraph` 是否存在，决定是否先清理。它没有回答“数据库里有几个人”，也没有读取文档内容。[源码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2228)。
+这是当前代码把“只要两个计数”绑定到“完整基础统计”的连带影响。数据没有因此被删除，普通检索也不因这次统计失败自动失效。直接调用完整统计则可能收到异常，不一定经过摘要层的零值回退。[异常处理][counts]。
 
-**AGE如何替代：**若新统计实现直接读取拓扑、在一次任务中计算结果，就不需要实现GDS图目录；管理自己的临时计算状态即可。原方法原样运行则会在这一准备步骤失败。
+**`include_optional=False`仍包含WCC。**如果先交付准确计数、后交付连通性，必须新增轻量计数路径并修改调用及结果消费，或者明确改统计合同；只删算法并填0不合格。结构分析超出资源上限时应明确不可用，不能截断部分图后称为全图WCC。
 
-**过程2：`gds.graph.drop`——把过期计算副本丢掉，准备重算**
+### 5.4 统计的交付顺序
 
-文档B已写入数据库，但旧的 `myGraph` 还没包含赵六、王五和海风项目。Cognee统计前会先检查目录，存在旧副本就调用 `gds.graph.drop('myGraph')`。
-
-```text
-数据库中的知识：仍然保留
-旧的内存计算副本 myGraph：移除
-```
-
-**这个drop不是删除张三节点、不是删除文档，也不是forget操作。**目的是让接下来的统计使用新数据。第一次统计没有旧副本时，这个调用可以不发生。[源码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2311)。
-
-**AGE如何替代：**释放/替换上一轮临时邻接表或计算结果；无需模拟同名GDS过程，更不应错误地去删AGE持久图。
-
-**过程3：`gds.graph.project`——把当前知识图变成算法能计算的连接表**
-
-现在从数据库构建新的计算副本。对教学图，可以把“投影”理解为准备这样的邻接表：
-
-| 节点 | 计算时认为与谁相邻 |
-|---|---|
-| 张三 | 李四、星河项目 |
-| 李四 | 张三、星河项目 |
-| 星河项目 | 张三、李四、赵六 |
-| 赵六 | 星河项目 |
-| 王五 | 海风项目 |
-| 海风项目 | 王五 |
-
-存储中的“赵六→维护→星河”在此次无向分析里会被视作两边都可到达。**这只改变计算时怎么看方向，没有改写原始关系的方向。**Cognee实际代码会选取图中的标签和关系类型，并排除 `GraphMetadata` 标记标签。[源码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2283)。
-
-**AGE如何替代：**读取选定节点ID和边端点，构建邻接结构，或者采用能直接遍历拓扑的实现。重点是参与计算的节点、边、方向与原统计合同一致；不是必须再创建一份持久图。这里会产生读取和内存成本。
-
-**过程4：`gds.wcc.stats`——这些知识分成几块互不相连的部分？**
-
-WCC是“弱连通分量”的缩写。对初学者，可以先问：“忽略箭头，只沿连线走，能不能从一个节点走到另一个？”能互相走到的节点归为一组。
-
-教学图中：
-
-```text
-组A：张三、李四、星河项目、赵六
-组B：王五、海风项目
-组数：2
-```
-
-`gds.wcc.stats` 给出分量数量，Cognee把它作为 `num_connected_components`。它反映图的连通结构；这不是按文本内容把文档做主题分类，也不直接评价答案是否正确。[源码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/neo4j_metrics_utils.py#L61)。
-
-**AGE如何替代：**从未访问节点出发，沿边遍历并标记，走完一组再找下一个未访问节点；或使用并查集。基本遍历成本随节点和边数量增长。需要真正计算，不能把“默认一组”写死。
-
-**过程5：`gds.wcc.stream`——每一块里分别有多少节点？**
-
-上一过程回答“有两组”，这个过程逐节点给出它属于哪个分量。教学输出可以写成：
-
-| 节点 | 分量编号（示意） |
-|---|---|
-| 张三 | A |
-| 李四 | A |
-| 星河项目 | A |
-| 赵六 | A |
-| 王五 | B |
-| 海风项目 | B |
-
-分量编号的具体值不重要。Cognee随后按编号分组计数，按大小降序，得到 `sizes_of_connected_components = [4, 2]`。[源码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/neo4j_metrics_utils.py#L93)。
-
-有100个分量不一定意味着图同样碎散：“一个大分量＋99个孤立点”和“100个均匀小分量”很不同，大小列表提供了这个区别。
-
-**AGE如何替代：**上一步遍历时顺便统计每组大小；一次计算就能产出“组数”和“大小”，不必为了复制两个GDS名字再遍历两次。此前完整交付范围的W6b包含这两项结果；可独立晚于记忆主流程交付，未交付时不开放相应分析。
-
-**过程6：`gds.allShortestPaths.stream`——各对节点之间，最少隔几条边？**
-
-它在 `include_optional=True` 时被调用。对同一张教学图，选几对节点看看：
-
-| 起点→终点 | 最短走法 | 距离 |
-|---|---|---:|
-| 张三→李四 | 张三—李四 | 1 |
-| 张三→星河项目 | 张三—星河项目 | 1 |
-| 张三→赵六 | 张三—星河项目—赵六 | 2 |
-| 王五→海风项目 | 王五—海风项目 | 1 |
-| 张三→王五 | 两组之间没有连线 | 不可达 |
-
-这里的距离是图上的步数，不是文档相似度，也不是现实中的组织层级。Cognee让GDS返回距离，随后在Python中取最大值作为 `diameter`，求平均作为 `avg_shortest_path_length`。[取距离代码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/neo4j_metrics_utils.py#L153)、[聚合代码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2333)。
-
-**为什么不能直接说这张全图“直径=2”？**因为还存在张三到王五这样的不可达点对。教学图可达点对中的最大距离确实是2，但它不等于未经定义的全图统计口径。GDS官方示例会过滤非有限距离和自身到自身；当前Cognee这段查询只取distance，没有这些过滤。因此适配时必须确认不可达点、自身距离、计数方向的处理，不能拿手算的可达平均数冒充现有代码结果。[GDS官方例子](https://neo4j.com/docs/graph-data-science/current/algorithms/all-pairs-shortest-path/)。
-
-**AGE如何替代：**需要对所选图计算距离并按约定聚合。AGE1.8的两点最短路函数可解决特定起终点查询，但这里要的是全图许多点对的统计，不是调用一次两点函数就完成。数据量增长后，这项明显比“数节点”昂贵，属于O3选配及单独性能验收。
-
-**过程7：`gds.localClusteringCoefficient.stats`——一个节点的邻居之间，也彼此连接吗？**
-
-继续看同一张图，先看星河项目。它有三个邻居：张三、李四、赵六。
-
-三个邻居之间总共可能有三对连接：
-
-| 邻居对 | 教学图里有没有直接连接？ |
-|---|---|
-| 张三—李四 | 有 |
-| 张三—赵六 | 无 |
-| 李四—赵六 | 无 |
-
-因此星河项目的局部聚类系数是 `已有邻居连接数 / 可能连接数 = 1/3`。再看张三：它的两个邻居是李四和星河项目，两者已经相连，所以张三的这个系数是 `1/1 = 1`。
-
-`gds.localClusteringCoefficient.stats` 计算各节点的局部系数，并给出全图平均值；Cognee读取 `averageClusteringCoefficient` 作为 `avg_clustering`。它描述三角形连接的紧密程度，**不是LLM置信度，不是记忆正确率，也没有直接决定某条答案的分数**。[Cognee调用](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/neo4j_metrics_utils.py#L185)、[GDS定义](https://neo4j.com/docs/graph-data-science/current/algorithms/local-clustering-coefficient/)。
-
-**AGE如何替代：**统计每个节点的邻居之间有多少连接，再按一致口径聚合。不能用节点数、边数直接替代；高连接度节点有很多邻居对要检查。该项只在选配统计开启时需要，属于O3。
-
-### 为什么实际 Cognee 的统计值，可能和上面手算不同？
-
-上面只画了六个业务实体。真实图还有结构节点。例如模型可能把两个人都关联到同一个“人物”EntityType：
-
-```text
-张三 ──is_a──> 人物类型 <──is_a── 王五
-```
-
-这条结构连接就可能把教学图的左右两组连起来。文档、文本块和NodeSet节点也会改变连通关系。**当前 `project_entire_graph` 并没有只挑选上面的六个实体做统计**，所以不能拿 `[4,2]` 当真实默认全图的必然结果。要专门统计业务实体子图，需要明确筛选和投影方案，而不是悄悄改变原接口的统计对象。
-
-本例的组数、组大小、局部聚类系数和指定点对距离经过独立算术核对；这是验证讲解自洽，不是GDS或AGE运行结果。
-
-### GDS七项缺失的用户后果：直接影响与连带影响分别看
-
-| 缺失项 | 何时会走到这里 | 直接失去的能力 | 当前代码的连带影响 | AGE适配与交付时点 |
-|---|---|---|---|---|
-| `gds.graph.list` | 基础统计检查内存投影 | 原统计路径不能判断投影是否存在 | 准备阶段就失败，整个metrics不返回；摘要入口可能降级0 | 新算法可完全不设GDS目录。启用统计前换掉原调用，不需复制同名过程 |
-| `gds.graph.drop` | 统计开始且旧投影存在 | 原路径无法清理旧计算投影 | 有旧投影的该次统计可能失败；不是删不了持久知识 | 管理自己的临时计算状态；不影响正常文档删除合同 |
-| `gds.graph.project` | 基础统计建立新投影 | 无法给后续原GDS算法准备内存图 | 之后的WCC等无法执行，计数结果也未能正常返回 | 可直接读目标图拓扑计算；不是AGE必须增加GDS投影功能 |
-| `gds.wcc.stats` | 基础统计，`False`也调用 | 不知道知识图有几个互不连通的部分 | 未隔离异常时，整个基础metrics失败，摘要计数也受牵连 | 连通性分析启用前实现；仅做会话可延期，启用摘要则须先解耦count路径 |
-| `gds.wcc.stream` | 同上，聚合各分量大小 | 不知道每个连通团体有多少节点 | 同样可能使整次基础metrics失败 | 与WCC数量一次遍历产出，两项一起验收 |
-| `gds.allShortestPaths.stream` | 仅`include_optional=True` | 缺直径和平均最短路径长度 | 当前完整metrics缺失败隔离，该请求会失败；`False`路径不因此调用它 | O3选配；点对可达/无穷值和计算预算另验，不是普通邻域检索前置 |
-| `gds.localClusteringCoefficient.stats` | 仅`include_optional=True` | 缺平均聚类系数，无法衡量邻居间连接紧密程度 | 当前完整metrics请求可能失败；不是反馈权重或答案评分失效 | O3选配；算法/图规模单独验证，不作为常规会话上线门槛 |
-
-七种过程不是每次固定执行七次：旧投影存在才drop，目录检查可能多次，最后两种算法只在optional开启时执行。源码依据是上述[Neo4j统计顺序](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2333)及各算法函数；本轮没有把缺插件运行实验伪装成已实测结果。
-
-**“已有记忆但摘要显示0”是怎样发生的？**以已正常存好的星河图为例：定制管理页请求摘要→没有该run的计数缓存→调用Neo4j完整基础metrics→其中GDS调用报错→摘要层捕获异常→返回0节点/0边且`computed_at=None`，不写成功缓存。下一次摘要请求可能重复这条失败链。图没有因此被删，旧数据仍可能正常检索。这里的缺陷是结果误导及额外失败请求，不是每轮Claude对话都被阻断。[回退代码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L80)。
-
-### 分阶段改造：不实现GDS库，也不伪装统计成功
-
-1. **先保证写入与检索。**完成三种APOC对应业务、身份/来源/状态与图读合同。用A/B文档合并、重复导入、关系查询和失败恢复验收；不能把GDS测试通过当成这些测试的替代。
-2. **需要展示规模时，先拆出准确计数。**在图接口/目标adapter增加轻量节点边计数方法，或实现单独的count服务；将`get_datasets_graph_counts`改接该路径，保留dataset上下文、缓存和权限。失败状态与真实0分开表达，并同步修改API响应/前端消费。这是待开发方案，当前代码不会自动解耦。若先不做，则不启用相应摘要功能。
-3. **需要连通性分析时再交WCC。**使用目标后端算法，或完整导出规模上限内的目标图再计算数量/大小；超限明确拒绝或标不可用，不能截断部分拓扑后冒充全图WCC。延期时关闭分析入口，或显式扩展返回与消费合同表达“不支持/未计算”；不能删除调用后直接填0，也不能只设置`include_optional=False`。此前标准预算包含WCC，是报告选定的完整交付范围，不是普通session依赖。
-4. **按需增加昂贵统计。**全点对路径和聚类保留O3单独预算，限制图规模、超时和内存；未启用就不运行。若只交基础记忆服务，不因为这两项未交付而判定整个后端不可用。
-
-验收要对应承诺：可以交付“普通记忆功能通过、摘要未启用、结构分析暂不支持”的明确阶段版本；不能交付“统计返回假0，却声称完整兼容”的版本。以上分期不降低来源/租户/并发正确性要求，实际Agent预算与范围口径见第11节。
-
-<a id="age-performance"></a>
-## 7. AGE执行机制：性能收益有可能，但不是“换Cypher就没有JOIN”
-
-
-AGE 是运行在 PostgreSQL 服务端的原生扩展。它管理 graph/schema、label 表、内部图 ID 和图属性类型，提供 Cypher 解析与执行。数据仍在 PG 中，不是另接一个独立存储引擎，也不是只在应用端装 Python 包。
-
-| 层次 | 普通 Cognee PG demo | 建议的 AGE 适配方案（待实现） |
+| 交付目标 | 必须做什么 | 可以暂缓什么 |
 |---|---|---|
-| 图容器 | 固定节点/边表；按 handler 使用独立 database 或共享库内的独立 schema | 每 dataset 映射 AGE graph，由 AGE 管理其 schema/label |
-| 节点身份 | 字符串节点主键 | AGE 内部 graphid + 属性中保留 Cognee UUID |
-| 边身份 | 起点、终点、关系名复合主键 | AGE 内部边 ID + Cognee 三元组身份 + `edge_object_id` |
-| 属性 | JSONB 列 | AGE `agtype` 属性 map；由 codec 转为 Cognee dict |
-| 图查询 | adapter 手写 SQL、Python BFS | adapter 使用固定 Cypher 模板，按需选择固定跳、VLE 或专用函数 |
-| 向量检索 | PGVector 等独立 adapter | 继续使用 PGVector 等；不因 AGE 自动合并为一个检索器 |
+| 先提供普通记忆服务 | 完成图写、图读、来源与启用的学习合同 | 不启用的摘要和结构统计可以暂缓 |
+| 显示知识库规模 | 准确节点/边计数，失败与真实空图区分 | 解耦后可以暂缓WCC |
+| 提供连通性分析 | 正确WCC数量和大小、范围与资源限制 | 全点对距离和聚类仍可暂缓 |
+| 提供完整结构分析 | 再实现距离和聚类、明确不可达点口径并压测 | 不承诺任意规模无限制精确计算 |
 
-AGE 的内部 graphid 是整数，不能直接替换 Cognee UUID，否则向量 ID、来源记录和反馈寻址会错位。[graphid 定义](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/include/utils/graphid.h#L29)。agtype 带有图实体的类型信息，不应把完整 vertex/edge/path 输出都直接当普通 JSON 解析。[官方类型说明](https://age.apache.org/age-manual/master/intro/types.html)、[驱动实体解析](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/drivers/python/age/builder.py#L212)。
-
-可选的初始模型是固定节点 label `CogneeNode`，将原始 `type` 保存在属性中，关系名映射为经验证的边 label。这样便于统一业务 ID；代价是已有 `MATCH (:Entity)` 类查询需要按新 schema 重写。也可以按业务类型分 label，但要解决跨 label 唯一性和类型变化。**这是 adapter 设计选择，尚未实现，不能假装 AGE 自动替我们完成。**
-
-不建议保留普通节点/边表再异步复制一套 AGE 图，作为默认起步方案：那会增加一套图状态及同步一致性问题。更直接的验证路线是 AGE 成为图的权威存储，业务元数据、向量仍走原有接口；已有数据通过明确迁移流程转入。
-
-### 是否能消除联表：固定跳的答案是否定的
-
-在 AGE 1.8，固定路径被解析为实体和连接条件，再交给 PG 规划执行。源码有 `make_path_join_quals`；仓库回归里，一跳 Cypher 就产生了两层 Nested Loop，组合节点属性索引、边 start_id 索引和目标节点主键查找。[路径转换](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/parser/cypher_clause.c#L5632)、[实际预期执行计划](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/regress/expected/index.out#L716)。
-
-所以不能成立的推论是“SQL 多次 JOIN 慢 → 改写成短 Cypher → 不再 JOIN → 必然快”。索引选择性、起点数量、连接中间结果和最终返回量仍然重要。回归测试还设置了 `enable_seqscan=false`，它证明某种索引路径可用，不证明生产默认优化器一定选择，更不代表性能基准。
-
-AGE 的价值在于提供图语义与专门实现、减少手工拼接复杂 SQL 的维护，并让特定遍历进入数据库内 C 代码。是否改善当前瓶颈，应区分“应用往返慢”“固定跳连接候选太多”“路径本身太多”，分别验证。
-
-### 变长路径确实有专用实现，但有四类必须测量的成本
-
-**第一，路径枚举与邻域不是相同工作。**普通 VLE 使用 DFS，当前路径内边不重复，但节点可以重复。Cognee PG demo 的邻域则按已访问节点去重，再返回这些节点之间的全部诱导边。两者最终端点集合可能相同，内部执行量却可能相差很大。`DISTINCT` 去重输出不等于提前免除路径展开。Cognee Neo4j 后端自身也使用 VLE，因此这里比较的是具体实现，不能说全部 Cognee 后端都执行 BFS。[AGE VLE 语义与 DFS](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L29)、[PG demo 邻域](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L907)。
-
-因此 AGE adapter 需要明确两种策略：批量一跳扩展可精确控制已访问节点，但仍有应用往返；有界 VLE 可在数据库内展开，但必须测量路径数量、环与高度节点的代价。普通 VLE 不能仅因用 C 实现，就无条件替代邻域 BFS。最终还需重新取 reached 节点间的全部边，不能只返回路径上出现的边；`edge_types` 对扩展与最终诱导边的作用也要与接口约定一致。
-
-**第二，1.8 冷缓存仍加载整个 graph 的拓扑。**`load_vertex_hashtable/load_edge_hashtable` 遍历图内 label 表，扫描没有按查询 seed 缩小范围。因此在巨大 graph 上偶发查询一个很小邻域，也可能先承担全图构建成本。实际缓存放在数据库 backend 的内存上下文中，多个连接可能各自加载一份；并非数据库全部连接共用一个邻接缓存。[全图拓扑加载](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_global_graph.c#L715)、[缓存管理](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_global_graph.c#L1024)。
-
-**第三，1.8 优化了缓存，但没有让写入后重建免费。**相对所审 1.7，1.8 将邻接链表改为平坦数组，改进边 hash；缓存从复制全部属性改为保存 tuple TID，按需取属性；使用图级版本计数减少无关事务导致的失效；读取 label 的锁改为 AccessShareLock。共享的是版本计数，邻接缓存仍是进程私有。[1.7 缓存](https://github.com/apache/age/blob/e1467f12e0b1d15dd35d3ab93f057a7112d425b8/src/backend/utils/adt/age_global_graph.c#L40)、[1.8 缓存与失效](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_global_graph.c#L50)、[属性按需读取](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_global_graph.c#L1375)。
-
-这些改动有明确的优化方向，不能由此虚构加速倍数。同图频繁变更仍可能使缓存重建；返回完整大属性路径的成本也与仅返回 ID 不同。1.8 共享版本表的 `AGE_MAX_GRAPHS=128` 是版本跟踪容量，不是数据库最多只能创建 128 个图；超过跟踪容量的图会回退 snapshot 失效判断。多 dataset 分图设计应专测这一边界。[版本计数分配](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_global_graph.c#L1898)。
-
-**第四，入口属性索引与 VLE 内部过滤不同。**起点可通过属性/ID 索引筛选，固定跳可以使用端点索引；VLE 内部边属性判断则会按 TID 读取属性后匹配，不是每一层都通过属性 GIN 筛边。1.8 新增的一项索引扫描优化还用于按内部图 ID 水合节点，不能扩大成“整个遍历都自动索引化”。[VLE 属性过滤](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L408)、[节点水合索引查找](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/agtype.c#L6120)。
-
-此外，1.8 VLE 将 start_id/end_id 作为独立列暴露，让终点条件转为整数等值 JOIN，便于 PG 选择连接计划。这是改进 JOIN，不是消灭 JOIN。[终点条件改写](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/parser/cypher_clause.c#L4858)。相关 VLE/最短路函数声明为 `PARALLEL UNSAFE`；可多连接并发，不代表单条遍历自动使用 PG 并行 worker。
-
-### 1.8 的最短路径能力能用到什么程度
-
-已核实的公开 SQL 函数是 `ag_catalog.age_shortest_path` 和 `ag_catalog.age_all_shortest_paths`，返回集合，参数包括图、起终点、边类型、方向及跳数范围。标准路径使用无权 BFS，按跳数寻找最短路。这可以支撑某些明确的路径查询，但不等于带权 Dijkstra，不等于 APOC/GDS，也不在本报告中扩大承诺为所有 Neo4j `shortestPath()` 写法可直接运行。[函数声明](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/sql/agtype_typecast.sql#L101)、[BFS 实现](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L2798)。
-
-有两个参数相关边界：`min_hops` 高于实际最短距离时，代码会退回 DFS 枚举再选最短，不再是普通 BFS 的成本；all-shortest 会在首次调用计算、物化结果后逐行返回，不能用外层 LIMIT 推断不会提前做大量工作。代码设有百万路径相关上限；该上限是保护条件，不是建议业务允许返回百万条。[fallback](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L3288)、[结果物化](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L3781)。
-
-### 7.1 放到100用户中会增加什么问题
-
-若100用户各两个dataset，就有200个逻辑图。AGE1.8的128是共享版本跟踪槽容量，不是只能建128张图；超出会采用回退失效判断。若多个PG连接反复查同一大图，各backend可能持有自己的拓扑缓存；连接池越大并非必然越快，也可能增加内存和冷加载。若100人共写星河一个图，则热点UUID、来源列表和缓存失效成为重点。这些都是源码导出的测试方向，尚无本项目100用户吞吐结果。
-
-因此同一套验收必须比较：固定跳与有界VLE、冷与热、读多与写多、孤立点与hub/环图、一个大共享图与很多私有小图。只跑一条热缓存MATCH无法支持选型。
-
+**这一章的判断：缺GDS不是AGE替代的统一阻断项；缺的是某项统计结果，就限制该项功能。只有当前耦合造成的假零和错误传播，必须在启用摘要前处理。**
 
 <a id="age-adapter"></a>
-## 8. AGE二次开发方案：改哪里、为什么可行、如何证伪
-
-
-Cognee 的实际调用是“业务 task/retriever → GraphDBInterface → 后端 adapter”。因此替换的是 adapter 实现及后端生命周期，不是把 Neo4j 语句逐字转发给 AGE。接口共有 **47 个方法：21 个 abstract，26 个非 abstract/default**；非 abstract 里既有可用 fallback，也有直接抛异常的能力占位。另有时间检索等接口外调用。完整逐方法清单见本节下方表格。
-
-拟新增文件均位于 `cognee/infrastructure/databases/graph/age/`：`adapter.py`、`codec.py`、`schema.py`、`AGEDatasetDatabaseHandler.py`。这些是建议职责划分，当前仓库没有这些实现。
-
-```mermaid
-flowchart LR
-    T[现有 cognify / search / improve / forget] --> I[GraphDBInterface 与少量接口外方法]
-    I --> A[新增 AGE adapter + codec]
-    A --> P[PG 连接 / 参数化 SQL 调用 cypher]
-    P --> G[服务端 AGE graph / label / agtype]
-    T --> V[现有 PGVector adapter]
-    H[新增 DatasetHandler] --> A
-    H --> G
-```
-
-| Cognee 功能及现有源码接点 | AGE 适配的具体工作 | 可以复用的代码 | 完成判据 |
-|---|---|---|---|
-| **provider 接入**：[get_graph_engine](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/get_graph_engine.py#L344)、`use_graph_adapter.py` | 注册 `age` adapter；承接工厂参数 `database_name`，区分 PG 数据库名和 AGE graph 名；初始化连接、加载环境、关闭/重连 | 现有 adapter 注册机制 | 通过 Cognee 工厂创建实例并正确释放；不是只有独立脚本能连 AGE |
-| **数据模型与 CRUD**：[add_data_points](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/add_data_points.py#L250)、接口 add/get/delete nodes、add/get/has edges | 新 `adapter.py/codec.py`；UUID 存业务属性，保留 AGE 内部 graphid；边保留业务三元组和 `edge_object_id`；批量 MERGE、缺失端点、返回 tuple/dict、agtype 解码 | 模型抽取、`get_graph_from_model`、边准备、向量索引逻辑 | 重复和并发写不重复；返回 UUID 能与向量命中对应；节点/边格式相同 |
-| **schema、索引、租户隔离**：[handler 接口](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/dataset_database_handler/dataset_database_handler_interface.py#L11)、支持后端注册 | 新 `schema.py/AGEDatasetDatabaseHandler.py`；graph 创建/解析/删除、业务 ID 索引、权限、schema 版本管理 | 现有 dataset 上下文及注册钩子 | 默认 access control 下 graph/vector 均有 handler；不同 owner/dataset 不串图；删除及连接缓存一致 |
-| **来源与安全删除**：[公共接口来源方法](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/graph_db_interface.py#L58)、[删除规划](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/unified/provenance_delete_planner.py)、rollback | 实现 15 个 provenance/metadata 方法；维护 `source_ref_keys/source_dataset_ids/source_run_ids/source_run_refs`；图对象与来源同事务更新 | 已有来源状态转换、共享删除规划和 rollback 调度 | 删除一个来源不误删仍被其他来源引用的节点/边；run 回滚只移除本 run 归属 |
-| **增量更新**：[incremental](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/api/v1/update/incremental.py#L187)、接口 `update_chunk_index/remove_belongs_to_set_tags` | 窄字段更新与 NodeSet 移除；保证来源/边/标签同步，能力验收后才打开 flag | chunk 差异计算与更新调度 | retained chunk 仅改位置；移除集合不误删其他集合数据 |
-| **feedback 学习**：[apply_feedback_weights](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/memify/apply_feedback_weights.py#L268)、[能力探测](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/capabilities.py#L23) | 实现节点/边 get/set 共4方法；按 `edge_object_id` 更新边；保护重建时的学习值；明确并发读算写策略 | 现有反馈计算公式与 improve 调度 | getter 只返回存在对象；缺省0.5；setter逐ID成功标志；不会假支持后吞错误 |
-| **truth 学习**：[truth 构建](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/truth_subspace/build.py#L409)、接口 get/set truth | 2个方法，alignment列表和epoch联合持久化；内容变化的失效与重建策略 | 现有 truth 计算、epoch 发布和检索门禁 | 节点坐标与epoch一致；失败/旧epoch不会被当成新状态 |
-| **局部更新与事实有效期**：[close_node](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/close_node.py#L37)、user_preferences/store | 实现 `update_node`，明确缺失字段、显式null、整模型重写的区别 | 上层事实关闭/偏好操作 | 不存在返回False；未指定字段保留；valid_to不被后续普通入图擦除 |
-| **图检索、可视化和 triplet**：[CogneeGraph](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/graph/cognee_graph/CogneeGraph.py#L124)、HYBRID/entities、memify triplet task | 实现6个抽象图读方法、`get_triplets_batch`；建议补 `get_id_filtered_graph_data` 和 top-degree，避免默认全图读取 | 现有向量召回、图排序、LLM回答、导出流程 | seed/跳数/方向/诱导边/NodeSet筛选与现有合同一致；分页不漏不重 |
-| **图摘要与结构统计，分别验收**：[dataset counts](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L86)、[PG demo metrics](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L879) | 摘要需轻量准确计数及失败状态；结构分析另实现WCC等metrics。若先交count后交WCC，须改接口/调用/消费合同并设能力门禁 | 现有缓存、PG demo的Python WCC可参考；均不要求GDS协议 | 只对启用功能承诺准确结果；未算/失败不伪造0。WCC不可用不作为正常入图检索的统一阻断项 |
-| **TEMPORAL 检索**：[temporal_retriever](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/temporal_retriever.py#L131) | 额外实现 `collect_time_ids/collect_events`，它们不在47方法里；沿用UTC毫秒时间边界和Timestamp→Event邻域语义 | 时间抽取、向量部分和调用流程 | 按当前范围/1～2跳事件关联返回正确结果，不偷换成另一套区间算法 |
-| **公开 Cypher / 自然语言图查询**：[NL retriever](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/natural_language_retriever.py#L84)、[Neo4j prompt](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/llm/prompts/natural_language_retriever_system.txt#L1) | 另做AGE query返回协议、方言prompt、真实schema注入及能力门禁；初期明确关闭 | API入口及部分生成/重试流程 | 不生成APOC/GDS或Neo4j shortestPath；明确支持的AGE语法与错误 |
-
-这里“可以替换”的源码依据，是上层依赖这些接口的**输入、输出和状态语义**，而非必须调用某个图厂商过程。例如 Neo4j 节点写入用了 `apoc.coll.toSet`/`apoc.create.addLabels`，边写入用了 `apoc.merge.relationship`；AGE 可按集合合并、类型映射、关系分组写入分别重新实现。这个设计有明确需求依据，但不是已验证的 SQL 成品。[Neo4j 节点实现](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L382)、[边实现](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L1238)。
-
-有四处尤其不能漏估：
-
-1. **按启用功能决定统计范围，不能与写入归为同级。**普通记忆上线必须满足写入/检索/来源合同；启用摘要前须给出准确计数和明确错误，启用结构分析前再交WCC。当前Neo4j `get_graph_metrics(False)`仍投影并计算WCC，因此若先交轻量摘要，必须改接计数路径，不能只关optional。PG demo已有独立Python算法，证明不必复制`gds.*`协议；这不代表必须在会话上线前实现所有统计。[Neo4j metrics](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2333)、[PG metrics](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L879)。
-2. **upsert 不能只写 `SET +=`。**重新 cognify 的输入带模型默认值，可能重置 feedback、truth、valid_to；单纯合并又可能留下应删除的业务属性。需定义业务字段、学习状态、来源归属的所有权，显式区分“未传”和“重置”。AGE1.8 的 MERGE actions 只能帮助分流，不能自动规定这些规则。
-3. **多跳返回值不等于返回路径列表。**Cognee 邻域先形成节点集合，再取相关诱导边；直接拿 AGE VLE 返回的路径边不一定等价。要验证孤立 seed、重复路径、方向和边类型过滤边界，不能认为一条 `MATCH ...[*]` 就已完成适配。
-4. **同一个 PG 不自动获得跨 adapter 原子事务。**当前存储任务分别调用 graph 和 vector 写入；仍需重试、补偿和失败恢复。AGE＋PGVector 共用服务器不改变这条代码事实。[写入次序](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/add_data_points.py#L250)。
-
-**此前“improve 部分支持”具体是哪些部分？**应明确拆开：通用图读取/三元组索引是一组；反馈权重4接口是一组；truth状态2接口是一组；事实关闭依赖的 `update_node` 又是一项。现有公共接口对后几组有 `NotImplementedError` 占位；feedback/truth 由 improve 检查 override/flag，`update_node` 则需单独验证调用路径和不支持时的行为。新 AGE adapter 必须真实实现并测试，不能把“AGE能存属性”写成“improve已支持”。[接口757行起](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/graph_db_interface.py#L757)、[能力探测](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/capabilities.py#L23)。本报告的标准功能工作量包含这几组，公开 NL/Cypher 单列。
-
-### 8.1 全部47个接口与接口外方法
-
-下表通过本轮AST和已有逐行审计交叉核对，全部来自同一[接口固定SHA](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/graph_db_interface.py#L58)。括号为固定源码的起始行号。
-
-| 分组 | 方法 | 数量/默认 |
-|---|---|---|
-| 生命周期 | is_empty(78), delete_graph(560) | 2 abstract |
-| 开放查询 | query(84) | 1 abstract；可显式关闭公开Cypher capability |
-| 节点 | add_node(97), add_nodes(116), delete_node(141), delete_nodes(156), get_node(484), get_nodes(496) | 6 abstract |
-| 边 | add_edge(508), add_edges(535), has_edge(639), has_edges(653), get_edges(666) | 5 abstract |
-| 图读 | get_graph_data(567), get_neighbors(678), get_nodeset_subgraph(690), get_connections(705), get_neighborhood(719), get_filtered_graph_data(743) | 6 abstract |
-| 统计 | get_graph_metrics(626) | 1 abstract |
-| 来源附加/移除 | attach_node_source_refs(211), attach_edge_source_refs(235), remove_node_source_refs(259), remove_edge_source_refs(280) | 4默认UnsupportedProvenanceCapability |
-| 来源删除准备 | delete_edge_triples(301), get_node_delete_data(317), get_edge_delete_data(339) | 3同上 |
-| 来源索引 | find_nodes_by_source_ref(361), find_edges_by_source_ref(375), find_node_source_refs_by_dataset(389), find_edge_source_refs_by_dataset(408), find_node_source_refs_by_pipeline_run(427), find_edge_source_refs_by_pipeline_run(446) | 6同上 |
-| 图metadata | set_graph_metadata(465), get_graph_metadata(479) | 2同上；以上来源相关共15 |
-| 增量/标签 | remove_belongs_to_set_tags(169), update_chunk_index(190) | 2；前者默认no-op，后者UnsupportedGraphOperation |
-| feedback | get_node_feedback_weights(757), set_node_feedback_weights(764), get_edge_feedback_weights(811), set_edge_feedback_weights(818) | 4默认NotImplementedError |
-| truth | get_node_truth_state(773), set_node_truth_state(780) | 2默认NotImplementedError |
-| 局部更新 | update_node(789) | 1默认NotImplementedError |
-| 三元组分页 | get_triplets_batch(827) | 1默认NotImplementedError |
-| 可视化种子 | get_top_degree_node_ids(573) | 1，有读全图的Python fallback |
-
-**额外两条已确认调用**：[Temporal](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/temporal_retriever.py#L131)直接要求collect_time_ids/collect_events，不在47方法中；[get_id_filtered_graph_data](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/graph/cognee_graph/CogneeGraph.py#L144)缺失会fallback全图，功能可跑但大图成本上升。
-
-PG demo现状：4feedback、2truth、update_node都未override；来源15、增量/NodeSet、triplet和基础metrics已有实现。AGE底层SET能力只能证明这些状态有地方存，不能使当前PG demo或未来AGE adapter自动通过improve门禁。[精确探测](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/capabilities.py#L23)、[反馈阶段gate](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/stages.py#L80)、[truth阶段gate](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/stages.py#L331)。
-
-另一个需放入测试而非随口承诺的并发点：反馈任务目前先get_weights，在Python算新权重，再set_weights。如果有两个绕过同dataset编排锁的调用并发，单独让setter事务化并不能自动覆盖整个读算写窗口；必须验证当前编排互斥范围，或条件性修改任务/CAS合同。本轮只证明读算写分离，**未审计所有调用路径锁，因此不宣称现系统必然丢更新**。[读算写位置](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/memify/apply_feedback_weights.py#L129)。
-
-### 8.2 可行性证据与必须实跑的关卡
-
-| 交付内容 | 源码依据足以支持的判断 | 必须实跑的关卡 |
-|---|---|---|
-| PG协议+agtype codec+schema | AGE官方定位为PG扩展，驱动/类型解析路径存在 | UUID、null、数值、vertex/edge/path解码和连接初始化 |
-| 图节点/边CRUD | 上游CREATE/MERGE/UNWIND/SET有原语与回归 | 业务唯一表达式索引、双会话竞态、缺端点skip、重复批次 |
-| 来源与删除 | Cognee已有来源规划和15接口，可复用上层 | 文档A/B共享实体，删A仍保留B；run rollback不误删历史来源 |
-| 学习/事实/Temporal | SET和现有公式/epoch编排可复用 | 不重置0.9，不擦valid_to，epoch发布一致；2个时间接口单验 |
-| 图检索 | MATCH/VLE有实现，公共返回合同明确 | 孤立seed、无向拓展/原向返回、诱导边完整，别只回路径边 |
-| 摘要/结构统计 | PG demo已不用GDS实现WCC字典；也可设计独立count路径 | 按启用范围验收；先count后WCC须改消费合同，不填假0；图筛选口径和大图资源另验 |
-| 多租户 | Cognee提供dataset handler注册点 | owner+dataset绑定、删除生命周期、连接权限、100用户负载 |
-| raw/NL | 可以声明AGE方言并换prompt | 自定义语料/错误处理；任意Neo4j/APOC/GDS不在承诺内 |
-
-图后端主体新增adapter、codec、schema、dataset handler及必要注册，不默认修改AGE内核；若选择先交轻量摘要、后交WCC，还需修改计数入口以及返回/消费合同，不能把这部分上层改动漏出范围。固定业务label+UUID属性及唯一索引，关系类型受控模板，来源/metadata与图写同事务；AGE作为图权威存储，不再保留另一套普通PG图并异步复制。若PoC发现所选UUID表达式或权限路径不能满足目标合同，先调整模型/方案，再决定是否扩大内核改动范围。**“可进入PoC”与“已证实生产可行”之间，隔着真实数据库与负载验证。**
-
-### 8.3 接入细节不能遗漏
-
-AGE Python驱动的连接初始化/agtype loader不是现有asyncpg的即插即用插件；应选择经过验证的async codec，或将同步驱动放入隔离执行器。新`database_name`参数必须区分PG数据库与AGE graph。固定内部查询能声明结果列，公开任意Cypher的返回列/类型则要另做协议。[AGE驱动](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/drivers/python/age/age.py#L174)。
-
-建议以AGE作为图的唯一权威存储，用Cypher DML维护对象，不默认保留普通PG图表再异步复制AGE；否则凭空增加第二套图一致性问题。直接SQL修改AGE内部label表的缓存失效、旧图升级trigger也未全验证，不能作为默认捷径。[label与trigger](https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/commands/label_commands.c#L438)。
-
-已有图迁移须先导出、保留UUID/来源/状态、在目标重建索引并核对，改provider不会自动搬图或改已有dataset登记。[COGX导出](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/migration/export.py#L237)只是迁移工具接点，不是本次已完成跨后端迁移。
-
-### 8.4 修正Graphiti边界
-
-
-当前 `modules/migration/sources/zep.py` 读取Graphiti/Zep导出JSON，产生COGXEpisode/Entity/Fact；GraphitiSource仅是ZepSource子类别名。导入这些数据后由Cognee自己的存储模型处理。[导入源](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/migration/sources/zep.py#L1)、[别名](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/migration/sources/zep.py#L136)。
-
-全仓另有旧evals对Graphiti基准，直接实例化Graphiti及其Neo4j连接，不是Cognee GraphDBInterface适配要求。[旧基准](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/evals/old/hotpot_qa_24_2025/src/qa/qa_benchmark_graphiti.py#L48)。因此应该写“外部Graphiti运行时/自定义Task不在本报告固定接口交付范围”；不能把历史版本功能判断当作当前SHA事实。
-
-<a id="ladybug"></a>
-## 9. Ladybug能否替代：明确支持边界，再分别选择改造或换库
-
-**结论：Ladybug可以承担Cognee的图存储与内置业务接口；但当前集成不能直接承担“同一个图跨机器多writer扩展、自动复制与故障切换”的集群要求。大量独立dataset可以继续使用并按dataset分片；单个热点共享图若已明确需要分布式写入或数据库HA，应换路线，不建议继续靠增加Cognee worker来扩容。**
-
-这里的owner指“唯一持有某个图文件读写句柄的数据库进程”，不是登录用户。100人可以访问同一owner，也可以分别访问100个dataset。人数、图数量、请求并发和数据库写并发是四件不同的事。
-
-本章固定Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e` 与 Ladybug **0.19.0**（`c934f673b6b1c5b680bdae3295cbd909b5855cef`，MIT）。这是普通平台的依赖版本；macOS Ventura/Sonoma使用>=0.17,<0.18，未纳入本章运行验证。[版本依赖](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/pyproject.toml#L74)。
-
-### 9.1 决策表：你的“大规模”是哪一种
-
-表中的“不满足”针对已明确缺失的架构能力；“需要压测”针对源码无法回答的吞吐与容量。不能把二者混为一谈。
-
-| 目标场景 | 当前实现能否直接满足 | 明确建议 | 改造或换库后的边界 |
-|---|---|---|---|
-| 100注册用户，各自少量资料，实际并发与单图规模可由一台机器承载 | **已有功能接入，可进入验收；尚未证明100用户SLA** | 保留Ladybug，先用单Cognee进程、每dataset单owner，做隔离/负载验收 | 无须新写图adapter；仍需处理9.7统计缺陷和失败恢复 |
-| 很多独立dataset，总容量/吞吐需要多台机器 | **现成实现没有跨机分片调度；可改造支持按dataset分散负载** | 走9.3路线A：每个dataset固定owner，多台机器各负责一批图 | 扩展的是独立图的总量；同一个热点图仍在一台机器 |
-| 100人共享一个图，读请求很多，写入可排队，单机资源仍够 | **现成单worker查询串行；是否达标须测，不能直接承诺高并发** | 先测排队与查询耗时；不达标且接受单owner时，走9.4路线B服务化/读调度 | 可以解除API抢文件、改善读取调度；仍未获得多writer集群或HA |
-| 同一个共享图，要求加机器就能分摊写入或超过单机容量 | **不能直接满足；路线A/B也不提供同图分布式分片** | 走9.5分布式候选路线，评估HugeGraph/JanusGraph/NebulaGraph | 必须新适配并验证来源一致性；分布式不保证任意热点写线性提速 |
-| 图服务必须跨机复制，owner宕机后自动接管，并满足明确RPO/RTO | **当前集成不提供这一套HA机制** | 优先验证ArcadeDB服务型替代；已有分布式需求则一起评估上述分布式候选 | ArcadeDB的HA基础不等于同图容量自动分片，也不等于Cognee插件已完整 |
-| 一个图有很多节点/边，但没有给出查询、硬件、并发与SLA | **不能仅凭“百万/千万节点”判支持或不支持** | 先按9.6做单图容量测试；一旦要求超单机分布式能力，按上一对应行选型 | 当前没有可引用的本项目容量基准，不编造节点数或QPS门槛 |
-
-**对应你提出的100用户：若是100个相互独立的知识空间，优先保留Ladybug并验证，增长后按dataset分片；若是100人共用一个企业知识图且明确要求多机HA，优先进入服务型图库适配。若只是100人共用图而无这些集群要求，先测实际读写负载，不因人数直接换库。**
-
-### 9.2 为什么能替代图功能，却不能直接替代集群架构
-
-#### 已有业务实现：不是从零开发
-
-Python AST对比 GraphDBInterface 的47个方法与 LadybugAdapter，47/47均有override，没有接口stub继承缺口。附加Temporal collect_events/collect_time_ids也实现；能力探针modules/improve/capabilities.py:24–25,84–93会认定feedback/truth支持。但探针只判方法覆盖，不测并发正确性与统计语义。基础remember/recall不用Neo4j GDS，缺GDS库不影响Ladybug已经实现的CRUD/邻域检索。
-
-例：Node(id=张三UUID,type=Entity,properties='{"description":"...","belongs_to_set":[...]}')，EDGE端点张三/星河、relationship_name='participates_in'。Ladybug已有自己的Python集合合并和MERGE逻辑，不要求复制Neo4j的apoc.coll.toSet、addLabels、merge.relationship原语。JSON扩展用于json_extract等（adapter.py:544–568）；pyproject.toml:81–90选择0.19.0而非0.19.1正是扩展二进制发布与存储版本匹配原因。自定义原始Neo4j/APOC查询仍不能直接当Ladybug查询执行，NL/query方言路径也需单测，不应把47方法等同任意Cypher兼容。
-
-#### 当前数据与调用路径
-
-Ladybug使用统一`Node`表，`id STRING PRIMARY KEY`；`EDGE`存有向关系，关系名是`relationship_name`属性，其他业务属性多保存在JSON字符串。文档/实体的分类通过type和属性表达，而不是Neo4j每种类型的物理label。来源四组字段已经实现，A/B共享事实可以使用现有来源规划；仍要验证并发与故障路径。
-
-默认启用数据库子进程：Cognee主进程经RPC发请求，活跃dataset的owner子进程持有Ladybug Database/Connection。Python异步接口并不代表同一连接同时执行多条查询。
-
-```mermaid
-flowchart LR
- C[100个客户端] --> API[一个Cognee API主进程]
- API --> ACL[用户权限与dataset上下文]
- ACL --> Q[进程内任务槽位与引擎缓存]
- Q --> W1[dataset A的Ladybug owner子进程]
- Q --> W2[dataset B的Ladybug owner子进程]
- W1 --> F1[A.lbug 本地持久文件]
- W2 --> F2[B.lbug 本地持久文件]
- API --> PG[PG关系库 / PGVector]
-```
-
-这是一种建议先验收的部署方式，不是已完成100用户压测的结果。[schema与执行](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L391)、[worker同步分发](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee_db_workers/harness.py#L419)。
-
-
-#### 规模边界是怎样从代码产生的
-
-| 源码事实 | 用星河项目的例子解释 | 对选型的直接影响 |
-|---|---|---|
-| 默认每个数据库worker持有一个Connection，worker同步派发请求；同Connection有mutex | 100人同时问星河项目，查询要轮流进入这条执行通道；一条查询内部可以用多个线程，但不等于100条查询并行 | 当前瓶颈可能首先是接入层；不能把它表述成Ladybug引擎永远不支持并发读 |
-| 0.19.0默认`enableMultiWrites=false`，事务管理限制写事务；同RW文件受OS锁保护 | 第一个进程已打开星河图，第二个进程不能靠再打开同一文件就增加一个写入者 | 不能通过加Uvicorn worker/Pod实现同图多writer扩容；本报告未验证调试multiwrite选项，不把它作为解决方案 |
-| queue、cache、dataset mutation lock均在Cognee进程内 | 4个API进程各自认为还有槽位，却可能同时争抢星河的同一文件 | 进程内排队不是集群调度；增加进程之前须建立唯一owner路由 |
-| 当前owner与文件生命周期没有集成跨机复制、选主和自动故障切换 | 星河图所在主机宕机，新API进程并不会自动获得一份已同步、可安全接管的图 | 不能把共享目录或HTTP接口当成HA；恢复策略需另做，或换有HA基础的服务型数据库 |
-
-依据：[同步worker](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee_db_workers/harness.py#L419)、[同连接mutex](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/main/client_context.cpp#L369)、[默认单写配置](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/include/main/database.h#L81)、[事务管理](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/transaction/transaction_manager.cpp#L55)、[RW文件锁](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/storage/storage_manager.cpp#L67)、[进程内dataset锁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/locks/dataset_lock.py#L1)。
-
-官方[并发说明](https://docs.ladybugdb.com/concurrency/)也区分两种情况：同一个读写Database对象可以创建多个Connection；多个独立Database对象共同打开同一文件则只能全部只读。因此路线B有同owner多连接的实现基础，但不能用“一个进程写、其他进程只读同文件”冒充在线读副本。该页描述的是引擎使用方式，Cognee当前同步worker仍需改造。
-
-### 9.3 保留Ladybug，路线A：大量独立dataset按owner分片
-
-**适用条件：每个图仍能在单机运行，压力来自图的数量多；不要求把一个图拆到多台机器。**例如100家客户各有自己的项目图，客户甲的查询不需要跨进客户乙的图。可以让机器A负责dataset 1～50、机器B负责51～100；这只是说明分配方式，不是每机50图的容量承诺。
-
-```mermaid
-flowchart LR
- U[客户端] --> API[多个Cognee API进程]
- API --> R[鉴权后按dataset查固定owner]
- R --> A[机器A：负责一批dataset]
- R --> B[机器B：负责另一批dataset]
- A --> F1[A持有的独立图文件]
- B --> F2[B持有的独立图文件]
-```
-
-这是**待开发架构**。当前handler按用户owner/dataset生成独立文件，已有数据边界可复用；缺的是跨机控制与路由。不能只给API增加副本就得到上图。
-
-| 要改什么 | 代码接点与待开发内容 | 必须通过的验收 |
-|---|---|---|
-| dataset到服务owner的映射 | 在关系库登记placement，新增路由服务；接入`dataset_database_handler`、`context_global_variables.py`，返回目标owner而非让每个API自行打开文件 | 同dataset的所有请求到同一owner；不同dataset可分布到不同机器；ACL仍先校验 |
-| 请求与任务调度 | 扩展现有`dataset_queue/queue.py`外围调度，增加跨进程准入、每租户配额、持久任务和重试幂等 | 一家客户批量导入不会耗尽全部请求槽；重试不会重复创建实体/关系 |
-| 写入正确性 | owner内部覆盖完整业务mutation的锁/事务；审计来源、feedback、truth、update读改写 | A/B共同支持一条边，追加A与删除B交错后仍保留A；单owner不自动解决所有异步业务交错 |
-| 引擎资源管理 | 在现有cache/worker生命周期上增加owner级CPU、内存、文件句柄预算和冷热回收监控 | 活跃图增长时资源受控，驱逐/重开不造成句柄泄漏与数据丢失 |
-| owner迁移与重启 | 新增停写→排空→关闭旧句柄→搬迁或恢复→新owner开放的交接协议 | 同一图始终只有一个有效RW owner；旧owner被隔离，不能继续写 |
-
-**能解决：**多个独立图的总容量与总请求量分散到多机；API可以横向部署。
-
-**不能解决：**星河这一个热点共享图仍由一个owner承担；没有获得单图分片、并行多writer或自动HA。若要自动故障迁移，还需数据复制/备份恢复、持久任务、旧owner隔离和RPO/RTO验收。仅给路由记录加租约，无法阻止失联旧owner继续写，也不能保证新机已有最新数据。
-
-### 9.4 保留Ladybug，路线B：一个共享图封装为唯一数据库服务
-
-**适用条件：单图资源仍可由单机承担，写入允许受控排队，主要诉求是多个API进程安全访问同一图，或改善读取调度；接受单owner故障边界。**
-
-例：100人共享星河项目图，4个API进程负责认证、LLM和HTTP响应，但数据库操作统一发给星河owner。它与路线A的区别是：A把不同图分到不同机器；B把同一图的访问集中到一个受控服务。
-
-| 改造层 | 具体工作 | 能解决什么 | 不能据此承诺什么 |
-|---|---|---|---|
-| 远程接入 | 补`RemoteLadybugAdapter`的dataset路由、dataset handler、选库、鉴权、连接/删除生命周期和schema迁移 | 多个API不再各自争抢同一本地文件 | HTTP可达不等于多租户正确，更不等于复制集群 |
-| 读取调度 | 重构当前同步worker请求执行；在唯一Database owner内评估多Connection读池、执行器、并发上限、超时与取消 | 去掉单Connection/同步派发造成的部分排队，允许验证并发读收益 | 不是配置开关；需验证引擎快照/事务规则及读写混合正确性，不能预报加速倍数 |
-| 写入调度 | 同dataset整业务mutation串行或显式事务；operation id、幂等重试、故障后结果对账 | 防止来源与学习状态读改写覆盖，避免超时重试重复写入 | 默认单写事务限制仍在；不会变成跨机器多writer |
-| 服务运维 | 请求限流、任务积压监控、优雅关闭、备份与人工/受控恢复 | 可观测地运行单owner服务 | 不提供数据库原生复制/自动故障切换；自动HA另有工程范围 |
-
-**当前`ladybug-remote`不能直接承担这条路线。**注册表没有它的dataset handler，默认开启backend access control时会失败；关闭权限只是绕过隔离。其构造还调用本地父类初始化，HTTP query缺dataset选库参数，远端schema缺本地来源字段`source_ref_*`，继承的来源方法会遇到schema不匹配。因此必须补完上述协议和数据合同。[remote源码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/remote_ladybug_adapter.py#L36)。
-
-#### 为什么`SHARED_LADYBUG_LOCK`不是扩容方案
-
-这个开关让各进程对同一图**轮流**执行：取跨进程缓存锁→打开库→执行一条query→关闭库→释放锁。它可以协调访问，却增加开关库/扩展/schema成本，仍串行执行。Redis或PG advisory lock可提供该缓存锁；默认SQLite/FS不能提供同样能力。Redis默认租期240秒，续约未在本次验证；PG锁显式解锁或连接死亡后释放，不是按Redis式TTL到期。[query实现](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L661)、[PG锁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/cache/sql/SqlCacheAdapter.py#L450)。
-
-更要紧的是锁只覆盖一条query，不覆盖整个业务操作。星河的一条边原来由文档B支持：任务甲读取`[B]`，准备追加A写成`[A,B]`；任务乙也读取`[B]`，准备撤回B写成`[]`。即使四条query每次都拿锁，乙最后写入仍会覆盖A。源码`_apply_source_ref_change`分开读写，锁是adapter本地asyncio锁，多进程之间无效。应锁住完整mutation或把它改成正确的事务/原子更新；feedback/truth/update也要同样审计。[来源读改写](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L1392)。
-
-**路线B的终点是“受控的单owner图服务”。如果你的硬要求是同图跨机扩写或自动HA，不把路线B当最终目标，直接进入下面的替代路线。**
-
-### 9.5 不再使用Ladybug：什么时候换、先选谁、具体要补什么
-
-以下是基于固定源码缺口的**验证顺序建议**，不是数据库性能排行榜，也没有候选已通过本项目100并发验收。许可证与逐项方法证据见[第10章](#alternatives)。换图服务时可保留现有PG关系库和PGVector。
-
-| 触发换库的明确条件 | 优先路线及固定版本 | 为什么纳入候选 | Cognee侧必须开发/验证 | 不可省略的限制 |
-|---|---|---|---|---|
-| 同一图由多API/多机访问，要求数据库服务自身复制与故障切换；尚无单图分片硬要求 | **先做ArcadeDB 26.9.1 PoC**（Apache-2.0） | 服务端已有数据库路由、Bolt事务与Raft HA实现，比自行给嵌入式文件补复制/选主更有现成基础 | 升级旧社区插件依赖；补dataset handler/选库、15个来源方法、学习状态、Temporal、正确metrics；做事务与HA故障测试 | 旧插件不是完整替代；HA≠已证明单图容量自动分片；Raft集群也不等于任意多节点独立同时写 |
-| 单图容量或持续写入已不能由单机承担，需要真正评估分布式存储与执行 | **先评HugeGraph 1.7.0，再按一致性/运维约束筛JanusGraph 1.1.0、NebulaGraph 3.8.0**（均为所核验版本的Apache-2.0） | 上游提供服务化/分布式存储组合或相关集群组件，可进入分片方案验证 | 新adapter、dataset handler、UUID/边身份、来源原子性与恢复、图查询/状态映射；明确所选存储/分区部署 | HugeGraph的graphspace有PD部署条件；JanusGraph外部后端事务/锁限制；Nebula集合属性需重建模型。都不能凭名字保证热点写线性扩展 |
-| 首要约束是使用PG运维体系，允许自管PG扩展，单PG主库能力满足目标 | **PG18＋AGE1.8**作为另一适配路线 | 有Cypher图原语和PG事务/运维基础 | 按第8章新增adapter、codec、索引与handler，替代APOC/GDS调用行为 | AGE不是同图分布式引擎的证明；不能保证消除JOIN或比Ladybug快；华为RDS缺AGE扩展时不能只改连接协议 |
-
-ArcadeDB推荐的依据是[数据库路由](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/bolt/src/main/java/com/arcadedb/bolt/BoltNetworkExecutor.java#L778)、[事务入口](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/bolt/src/main/java/com/arcadedb/bolt/BoltNetworkExecutor.java#L1061)和[HA插件](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/server/src/main/java/com/arcadedb/server/HAServerPlugin.java#L27)，不是已经跑过其HA压测。其社区插件的实际缺口在第10章逐项列出；不建议未经补齐直接用于完整Cognee生产业务。
-
-**不存在本轮已证实的“改一个provider就能获得完整功能、分布式容量与HA”的宽松许可替代。**有可开发的候选，接入完成后必须用同一组来源删除、隔离、反馈、检索和故障用例验收；迁移时保持UUID、来源与学习状态，并核对图向量关联。
-
-### 9.6 单图容量和100用户：用什么测量决定是否走改造路线
-
-先把负载拆成独立图数、活跃图数、单图节点/边规模、每秒读写、查询跳数/扇出和目标P95。注册100用户既不是100并发，也不能证明需要分布式图；100同时recall又可能包含向量、图查询与LLM三段不同的瓶颈。
-
-| 必须测的现象 | 从代码能确认的原因 | 根据结果采取的行动 |
-|---|---|---|
-| 多dataset进入任务的排队时间、冷热打开时间 | 默认queue限额6，按task+dataset管理槽位；同task同dataset可重入，其他task仍占槽。它不是全HTTP入口限流，关闭backend access control时该路径不生效 | 调整准入与资源预算；独立图总量超过单机再走路线A，不能直接把上限改100 |
-| 同dataset图查询排队、执行时间与读写等待 | 默认复用adapter/worker，同步派发；进程内dataset锁也使相关写pipeline等待 | 写入可排队、读是瓶颈时评路线B；硬要求同图跨机扩写则换分布式路线 |
-| 总RSS、CPU、打开文件与重开次数 | buffer_pool/max_db_size默认配置32GiB，线程0取引擎默认；LRU默认6但pinned可超过软上限 | 按总资源配置每DB预算；不能写成6×32GiB必占192GiB RAM，也不能把默认配置当最大可支持图规模 |
-| 同图多API worker错误、idle句柄持有 | 各进程有各自cache/锁；文件未释放时另一RW owner锁冲突 | 用固定owner路由；反复重试和共享目录不能解决稳定多owner |
-| owner或主机故障后的丢失量与恢复时间 | 当前接入没有完整跨机HA | 接受恢复目标则制定备份/受控恢复；不接受则选服务型HA路线 |
-
-空闲TTL600秒是cache回收阈值，周期性reaper、容量驱逐、活跃pin和引用都会影响实际关闭时间，不是硬性保留或关闭时限。以上默认值可由[queue](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/dataset_queue/queue.py#L78)、[上下文](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/context_global_variables.py#L202)、[adapter资源参数](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L70)及`closing_lru_cache.py`核对。任何容量结论还要记录硬件、数据度分布、查询深度和混合负载；当前尚无这类生产基准。
-
-### 9.7 无论规模大小都要处理：已复现的统计正确性缺陷
-
-这些是**Cognee Ladybug adapter查询的缺陷**，应修复或明确标记统计不可用；不是Ladybug无法存节点/边的证据，也不是判定需要分布式的理由。为了不与选型决策混淆，统一放在这里。
-
-adapter.py:3422–3447 把每个节点3跳内邻居列表当组件，缺少完整连通闭包，列表顺序也没有统一归一，孤点因MATCH没有行而消失。教学反例张三—李四—星河—赵六—运维平台是一条5节点链，实际只有1个连通分量，但两端3跳集合不含对端，与中间集合不同，不能保证返回1。只有孤点王五的图实际有1组件；实跑原query返回[[null]]，helper返回None、size列表为空，不是正确的1。影响是监控/可视化组件数和大小误导，并非普通图检索必然失败。应修复为正确WCC，或暂时明确标记统计不可用；若保留三跳邻域统计，必须另定名称与语义，不能冒充连通分量，也不能声称GDS替代已等价。
-
-adapter.py:3449–3458 最短路查询前面枚举n,m，最后却只RETURN MIN(LENGTH(path))，没有按(n,m)分组。返回的是所有候选对路径长度的全局最小值，后面max这个单元素列表并不是直径。张三—李四—星河链真实直径2，存在一跳边使全局min=1，单独这个helper会返回[1]（0.19.0原query实测为[[1]]）；完整optional metrics随后还会遇到聚类异常，最终回退为diameter=-1，不能写成页面最终显示1。普通 recall不用该optional统计；需要直径/平均最短路时应修。无界变长路径枚举还存在工作量放大。
-
-adapter.py:3469–3479 clustering 使用第二个必匹配三角形MATCH，没有三角形的节点被丢弃，不能等价于包含零值节点的全图平均。已在0.19.0实跑四种图，均报Binder exception: Expression avg_clustering contains nested aggregation。外层3349–3420捕获任何异常返回全0节点/边及-1optional，导致“算统计失败”伪装成空图。应拆分基础计数与optional统计失败，返回明确不可用状态，并写反例测试。
-
-#### 原查询复现实验（已完成，不是性能基准）
-
-隔离venv安装PyPI `ladybug==0.19.0`，Python3.14/Windows；先import cognee_db_workers注册OpenSSL，再直连内存Ladybug。通过AST从当前Cognee源码提取原query，未改写查询。64MiB buffer pool、256MiB max DB size、2线程。复现核心脚本附在本篇末尾；表中列出实际输出。原始完整JSON保存于本轮本地研究记录。没有安装/运行完整Cognee、LLM和端到端API，不外推吞吐。
-
-|输入图|真实连通分量|原WCC query|原sizes query|原shortest query|原clustering query|
-|---|---|---|---|---|---|
-|王五孤点|1|[[null]]|[]|[[null]]|nested aggregation错误|
-|张三—李四—星河3节点链|1|[[3]]|[[4],[4],[4]]|[[1]]（真实直径2）|同上|
-|5节点链|1|[[5]]|[[5],[6],[6],[6],[5]]|64MiB buffer不足错误|同上|
-|三角形+1条尾边|1|[[4]]|四行[5]|64MiB buffer不足错误|同上|
-
-WCC额外原因：无向变长路径可返回起点，COLLECT(DISTINCT m.id)含源点后又拼接[node_id]，列表长度甚至超过总节点数；每节点得到的有序列表还不是规范集合。最短路64MiB失败说明该查询在这个配置上的实际风险，不能说5节点Ladybug普遍不能处理。标准图算法可以修复这些适配器查询；不是Ladybug底层存不下这类图。
-
-### 9.8 改造成本边界与证据索引
-
-全Agent开发的已有 **30～60 Agent小时、约1～3自然日**只是单owner验证、统计修复与复核的未校准预算，**不包含路线A的跨机owner调度，也不包含路线B服务化，更不包含复制/自动HA**。路线A/B先各自冻结部署和一致性合同；第11.2节的8～16 Agent小时仅用于选定路线的首轮架构PoC，不是完成整个服务的承诺。PoC至少跑通两API进程访问、来源交错写、重启/迁移，然后以实际执行日志估剩余成本。
-
-本章由Ladybug审计与候选数据库审计两个子Agent复核场景结论，主Agent重组；本轮重写没有新实施适配代码、没有新增100用户压测。固定源码入口如下：
-
-- [Cognee版本依赖](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/pyproject.toml#L74)
-- [Node/EDGE schema与query](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L391)
-- [来源读改写锁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L1392)
-- [全部统计](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L3349)
-- [context进入queue与owner选择](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/context_global_variables.py#L202)
-- [queue配置](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/dataset_queue/queue.py#L78)
-- [进程内dataset lock](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/locks/dataset_lock.py#L1)
-- [pipeline取得写锁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/pipelines/operations/pipeline.py#L165)
-- [pipeline任务进入context](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/pipelines/operations/run_tasks.py#L93)
-- [search进入context](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/search/methods/search.py#L327)
-- [同步DB worker分发](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee_db_workers/harness.py#L419)
-- [PG缓存锁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/cache/sql/SqlCacheAdapter.py#L450)
-- [remote adapter](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/remote_ladybug_adapter.py#L36)
-- [Ladybug MIT](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/LICENSE)
-- [默认multiwrite=false](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/include/main/database.h#L81)
-- [事务管理](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/transaction/transaction_manager.cpp#L55)
-- [同连接mutex](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/main/client_context.cpp#L369)
-- [RW文件锁](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/storage/storage_manager.cpp#L67)
-- [OS锁实现](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/common/file_system/local_file_system.cpp#L117)
-- [官方并发拓扑](https://docs.ladybugdb.com/concurrency/)（2026-09-28读取；与固定版本冲突时以固定源码为准）
-
-<a id="alternatives"></a>
-## 10. 其他开源图数据库：先过许可证，再过Cognee业务合同
-
-这里“友好”按MIT/Apache-2.0等宽松开源许可筛选，明确不选择GPL服务端；BSL/SSPL也不作为宽松开源方案推荐。结论针对固定版本与组件，不代表未来版本或商业附加模块。
-
-
-### 固定代码基线及许可证
-
-| 候选 | 固定基线 | 服务端许可证 | 当前结论 |
-|---|---|---|---|
-| ArcadeDB | 26.9.1 / b6a92623554bb332d7564de19fbd9fdbc2d1d45e | Apache-2.0；[LICENSE](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/LICENSE#L1) | 有旧社区adapter，但来源/状态/handler/metrics需补齐 |
-| Apache HugeGraph | 1.7.0 / b12425c2032bf0d21a97b8221f42a18055c2982f | Apache-2.0；[LICENSE](https://github.com/apache/hugegraph/blob/b12425c2032bf0d21a97b8221f42a18055c2982f/LICENSE#L1) | 原生服务化、PD条件下graphspace、权限、Gremlin/REST；需新adapter和handler |
-| JanusGraph | 1.1.0 / 3b8843ffc6c81cf0076bf00119f1ffe80b9cf234 | 代码 Apache-2.0；文档部分 CC-BY-4.0；[LICENSE](https://github.com/JanusGraph/janusgraph/blob/3b8843ffc6c81cf0076bf00119f1ffe80b9cf234/LICENSE.txt#L1) | Gremlin 服务化，可多图，但 Cassandra/HBase 后端非一般意义跨行 ACID；来源回滚风险较大 |
-| NebulaGraph | 3.8.0 / fa928930ab34f150db522933323aa610e54f26e7 | Apache-2.0；[LICENSE](https://github.com/vesoft-inc/nebula/blob/fa928930ab34f150db522933323aa610e54f26e7/LICENSE#L1) | graph space + RBAC + 分布式；nGQL/强 schema、属性类型和事务粒度差异需重写 |
-
-许可证只指上述服务端代码，不把客户端/商业版/打包依赖自动等同。JanusGraph 选 Cassandra/HBase 开源后端，不能为获得 BerkeleyDB ACID 而忽略后端的单独许可。最终容器还需按依赖锁定版本核验，不在本次源码阅读中声称完成 SBOM 审计。
-
-### Cognee 接入现状及共同工作
-
-读取本地 Cognee `get_graph_engine.py`、`supported_dataset_database_handlers.py` 和社区仓库 `ea5eaa681b8606c9813bb3d4c74553c06e4bb3aa`。HugeGraph、JanusGraph、NebulaGraph在所查核心/社区仓库中未见已注册adapter。社区 graph 包清单存在 ArcadeDB、Memgraph、NetworkX、pggraph、Spanner、TuringDB、TypeDB、turbopuffer；hybrid 有 Falkor。不能把“都有图”当成兼容证据。
-
-三者都需实现 Cognee GraphDBInterface 实际方法合同（UUID、节点/边更新、来源归属、来源删除、反馈/真值、检索子图、metrics），再新增 DatasetDatabaseHandler 完成 dataset 创建/删除/连接解析；向量仍选 PGVector，关系库仍 PG，不要求换图后端时一起换掉。仅 use_graph_adapter 不会自动获得多租户，默认后端 ACL 需要 handler。
-
-具体例子：A 文档与 B 文档都说“张三参与星河”。删除 A 时必须保留 B 支持的同一条边。若未实现并验证来源归属合同，就不能证明撤回A后仍正确保留B。来源可以存图内，也可以由经过验证的外部ledger管理；仅有CRUD不足以作出保证。新候选必须过与 AGE 相同的来源追踪测试，不能只跑 add/search 示例。
-
-### ArcadeDB 26.9.1：候选中优先 PoC，但“有 adapter”仍不等于可直接使用
-
-服务端固定 **26.9.1 / b6a92623554bb332d7564de19fbd9fdbc2d1d45e**，官方 [LICENSE](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/LICENSE#L1) 是 Apache-2.0。社区 adapter 固定 **0.2.0 / ea5eaa681b8606c9813bb3d4c74553c06e4bb3aa**；[pyproject.toml:10](https://github.com/topoteretes/cognee-community/blob/ea5eaa681b8606c9813bb3d4c74553c06e4bb3aa/packages/graph/arcadedb/pyproject.toml#L10) 依赖 `cognee[neo4j]==1.4.2`，而本地Cognee为1.6.0；插件还限定Python>=3.10,<3.14，不能在本次Ladybug测试的Python3.14环境中假定它也可安装。需单独锁定兼容环境并升级依赖，不能让解析器悄悄降级核心。社区仓库 [LICENSE](https://github.com/topoteretes/cognee-community/blob/ea5eaa681b8606c9813bb3d4c74553c06e4bb3aa/LICENSE) 是 Apache-2.0 插件代码许可；Neo4j Python driver 的许可要与 Neo4j 服务端 GPL 区分，使用驱动不会把这个数据库变成 Neo4j 服务端。下文没有复用 Neo4j APOC/GDS 的假设。
-
-服务端确实有需要的基础机制：
-
-- [BoltNetworkExecutor:778](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/bolt/src/main/java/com/arcadedb/bolt/BoltNetworkExecutor.java#L778) 从请求获取数据库；[1061](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/bolt/src/main/java/com/arcadedb/bolt/BoltNetworkExecutor.java#L1061)、1111、1147 将 BEGIN/COMMIT/ROLLBACK 映射到数据库事务。这是开发显式事务的基础，不是现有插件已原子处理来源回滚的证明。
-- [BoltNetworkExecutor:1257](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/bolt/src/main/java/com/arcadedb/bolt/BoltNetworkExecutor.java#L1257) 数据库选择设置用户上下文；[ServerSecurityDatabaseUser:60](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/server/src/main/java/com/arcadedb/server/security/ServerSecurityDatabaseUser.java#L60) 具有数据库和类型授权快照。可以作为每 dataset 独立 database 的基础，但仍需测试账号 A 无法访问 B。
-- [HAServerPlugin:27](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/server/src/main/java/com/arcadedb/server/HAServerPlugin.java#L27) 说明 RaftHAPlugin 实现，含 quorum；[README:340](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/README.md#L340) 有 HA 故障测试入口。只证明上游有代码和测试，不代表本报告跑过或 100 用户性能过关。
-
-本次用 Python AST 对比当前 Cognee `GraphDBInterface`（47 方法、21 abstract）与社区 `ArcadeDBAdapter`：**21 个 abstract 全有实现，因此不能说它必然因抽象类不可实例化；但 26 个非抽象扩展全部继承默认实现。** 以下是实质缺口：
-
-| 缺口 | 源码定位 | 用例及实际影响 | 二次开发 |
-|---|---|---|---|
-| 默认多租户未接通 | [register:14](https://github.com/topoteretes/cognee-community/blob/ea5eaa681b8606c9813bb3d4c74553c06e4bb3aa/packages/graph/arcadedb/cognee_community_graph_adapter_arcadedb/__init__.py#L14) 只注册 adapter；[adapter:52](https://github.com/topoteretes/cognee-community/blob/ea5eaa681b8606c9813bb3d4c74553c06e4bb3aa/packages/graph/arcadedb/cognee_community_graph_adapter_arcadedb/arcadedb_adapter.py#L52) `session()` 不传 database | A/B 两个用户不能仅靠同服务器地址自动进入不同 database；默认 Cognee ACL 缺 handler 会拒绝配置。关闭 ACL 再连接默认库会丢掉原本 dataset 隔离边界 | 增加 handler、database 名路由、池缓存键、用户授权和生命周期；不能只改一行 provider |
-| 15 个来源/元数据方法全缺；增量 chunk 更新缺 | [GraphDBInterface:190](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/graph_db_interface.py#L190) 至479默认 Unsupported；[adapter:106](https://github.com/topoteretes/cognee-community/blob/ea5eaa681b8606c9813bb3d4c74553c06e4bb3aa/packages/graph/arcadedb/cognee_community_graph_adapter_arcadedb/arcadedb_adapter.py#L106) 与234 接收 source_ref_key/run_id 却未使用 | A、B 两份资料共同支持“张三参与星河”，当前 adapter 不能完成图内来源合同。核心 marker 检测会保留 ledger 路径，因此不能直接说所有 forget 都失败；但图内精确撤回/失败回滚语义不成立，旧 ledger 是否覆盖目标场景还需专项验证 | 来源索引、集合并集/移除、run 对账、图 marker、增量位置更新；验证失败回滚和图向量补偿 |
-| 反馈4、真值2、局部 update1 均缺 | [GraphDBInterface:757](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/graph_db_interface.py#L757) 起默认 NotImplementedError | 用户说“这条回答错了”，当前adapter不能通过这些接口持久化节点/边反馈权重与节点truth状态；这不等于反馈文本或会话记录不能保存。旧事实标valid_to也不能依靠update_node完成。improve 的具体路径会按能力检测拒绝/报错，不能笼统说所有 improve 不可用 | 状态读写、局部属性更新，能力检测回归 |
-| Temporal 两方法不存在 | [TemporalRetriever:128](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/temporal_retriever.py#L128) 调 collect_time_ids/collect_events；adapter AST 无这两个方法 | 问“张三上周负责哪个项目”进入 TEMPORAL 无相应调用实现 | 按时间字段/事件模型实现并测边界 |
-| 连通分量实现结果不正确 | [adapter:700](https://github.com/topoteretes/cognee-community/blob/ea5eaa681b8606c9813bb3d4c74553c06e4bb3aa/packages/graph/arcadedb/cognee_community_graph_adapter_arcadedb/arcadedb_adapter.py#L700)，725非空返回1、[total] | 六节点教学图有两个独立小团体 [4,2]，代码会返回1个大小6的团体。注释称 BFS，实际只 collect/count，未遍历边 | 正确 WCC，实现同返回结构；不能将常数当降级成功 |
-| 可选路径/聚类未计算 | 同上740至749 | 请求全图直径、平均最短路径或聚类统计时返回-1，表示未计算，不能当成真实距离或聚类值 | 明确 optional 未算标记或实现有预算算法 |
-| 写入语义仍需核对 | [adapter:94](https://github.com/topoteretes/cognee-community/blob/ea5eaa681b8606c9813bb3d4c74553c06e4bb3aa/packages/graph/arcadedb/cognee_community_graph_adapter_arcadedb/arcadedb_adapter.py#L94)、114仅属性覆盖 MERGE；52每次session.run | 第二份文档带 belongs_to_set=[运维交接] 时直接覆盖可能丢原[项目启动]；同 UUID 并发 MERGE 是否由唯一索引保护尚未证明。事务基础存在不代表多个独立 query 自动成为同一事务 | UUID唯一索引、稳定边键、集合原子更新、事务边界与冲突重试实测 |
-
-100 用户的可行架构是 **Cognee API + ArcadeDB 服务（按 dataset database 路由）+ PGVector + PG 关系库**，不是 100 用户各嵌一个数据库进程。这个设计解除本地文件只能由特定进程持有的问题，但引入连接池、账号/库管理、服务端共享资源和热点写冲突。它只是候选方案：当前代码缺口不小，不能说现有 adapter 比 AGE 路线便宜或更快。首次 PoC 必须同时覆盖来源、隔离、UUID并发及 metrics，不能只测 Bolt 可连接。
-
-### HugeGraph 1.7.0：值得做服务化备选 PoC
-
-代码证据：`GraphSpaceAPI.java:58,101` 提供 graphspaces 及 admin 创建；`GraphsAPI.java:65,89,125,179` 提供 graphspace 下多图及角色守卫。`VertexAPI.java:119` 与 `EdgeAPI.java:145` 批量写通过 commit 封装；PropertyKeyBuilder 默认 SINGLE，支持 SET/LIST，VertexLabelBuilder 有主键，EdgeLabelBuilder 默认 SINGLE。固定源码链接列于本节证据入口。
-
-**命名空间有部署条件。**PD是HugeGraph的集群元数据/调度组件。1.7.0的graphspace元数据与组合图名路径要按PD部署验证；`createGraph`的非PD分支调用`createGraphLocal(name, ...)`后提前返回，不能仅凭REST路径宣称不同graphspace下的同名图已隔离。非PD方案应生成全局唯一graph名，再验证授权、创建/删除与重启后的路由。[GraphManager创建分支](https://github.com/apache/hugegraph/blob/b12425c2032bf0d21a97b8221f42a18055c2982f/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/core/GraphManager.java#L1228)。
-
-模型建议（设计而非已有实现）：每 dataset 一 graph；固定 `CogneeNode` label + UUID 自定义 ID；模型类型用属性/索引；来源可以 SET 属性或独立 source 关系。这样“新抽取关系类型”不一定触发大量 DDL，但需要验证类型过滤和边唯一性。不能原样执行 Neo4j APOC/GDS 或把 Gremlin 当 Cypher。
-
-缺陷拆解：输入“张三属于项目启动”后再输入“张三属于运维交接”，必须把NodeSet成员标签并成集合，不能用REST更新覆盖旧值；文档来源source_ref_keys是另一套需要单独维护的集合合同。代码有SET cardinality只是数据表达的基础，并不证明两个并发 read-modify-write 的写入不会丢来源。PoC 需实测并发来源合并、同边幂等及重试。
-
-100用户：PD部署中的graphspace/graph可作为租户命名空间基础，非PD先采用全局唯一graph名，权限代码存在；但仅创建 100 个 graph 不等于每图独立 CPU、连接/内存配额，也不能推导 100 并发合格。应使用受控服务账号 + Cognee ACL/handler，或每图受限账号；验证越权访问和大量建图/删图开销。部署从嵌入式变成 Server+存储，HA 还依赖所选后端/集群配置。
-
-### JanusGraph 1.1.0：有规模化能力，但本场景优先级低于 AGE/HugeGraph
-
-`docs/basics/transactions.md:13` 明说 Cassandra/HBase 不一般提供串行化隔离或多行原子写。`docs/advanced-topics/eventual-consistency.md:13` 明说约束锁默认不启用，需要 `setConsistency(..., LOCK)`；同文件167起描述并发删除+修改可能产生 ghost vertex。源码级文档固定到 release，避免引用 master 跨版本。
-
-例子：撤回 A 文档需要删除“来源 A→张三”记录，重算边来源，并在无剩余来源时删边。执行一半进程失败，不能因为 `tx.commit()` 存在就假设全组动作已回滚。A 删除张三时 B 并发修改张三，在最终一致后端甚至可能出现幽灵节点。开发范围不仅 Gremlin 翻译，还包括明确不变量、幂等日志/恢复、失败注入和锁重试；这些复杂性不是 Agent 自动写代码能免掉的。
-
-`ConfiguredGraphFactory` 支持动态多图（docs/operations/configured-graph-factory.md:3）；`JanusGraphSimpleAuthenticator.java:30-50` 委托 SimpleAuthenticator 校验凭据，不能把它等同每图授权。100 租户建议独立 graph/keyspace + 受控路由，并额外实现/证明 graph 级授权；任由用户提交 Gremlin 将扩大越权/脚本执行风险。分布式运维至少要理解图服务和底层存储、索引，不为 100 注册用户本身引入该复杂度。
-
-### NebulaGraph 3.8.0：可做分布式备选，数据模型必须改
-
-`GraphFlags.cpp:45`：enable_authorize 默认 false。`PermissionCheck.cpp` 根据语句分读数据、写数据、schema、space 管理权限。不能部署默认配置便宣称 100 租户安全隔离。每 dataset 一个 space 可对应 Cognee handler，但必须管理 space/schema 就绪及连接 pool 的 space 绑定。
-
-`src/interface/common.thrift:268` PropertyType 是标量属性枚举（无 LIST/SET/MAP）；查询表达式的 list/map 不能混同可持久化属性。例子：Cognee 的 belongs_to_set/source_ids 是集合，而 Nebula 不能简单存 SET 属性；JSON 字符串虽能存，但数据库不能按集合语义原子增删，要改为来源节点/边或专门属性编码加并发协议。若两个 writer 各读 [A] 再写 [A,B] 与 [A,C]，最终可能丢 B 或 C，继而误删共享知识。
-
-`UpdateVertexProcessor.cpp:36` 和 `UpdateEdgeProcessor.cpp:35` 有 insertable 路径，只证明存在 UPSERT，不证明跨多个点/边的业务事务。本轮未证明多条语句可构成与Cognee来源维护等价的事务，需在PoC验证失败恢复。关系唯一性可利用 VID + edge type + rank + dst 的结构，但要稳定映射 Cognee UUID/关系键，不能每次随机 rank。
-
-
-### 固定源码证据入口（其余候选）
-
-- HugeGraph [GraphSpaceAPI:58](https://github.com/apache/hugegraph/blob/b12425c2032bf0d21a97b8221f42a18055c2982f/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/space/GraphSpaceAPI.java#L58)、[GraphsAPI:65](https://github.com/apache/hugegraph/blob/b12425c2032bf0d21a97b8221f42a18055c2982f/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/profile/GraphsAPI.java#L65)、[VertexAPI:119](https://github.com/apache/hugegraph/blob/b12425c2032bf0d21a97b8221f42a18055c2982f/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/graph/VertexAPI.java#L119)、[EdgeAPI:145](https://github.com/apache/hugegraph/blob/b12425c2032bf0d21a97b8221f42a18055c2982f/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/api/graph/EdgeAPI.java#L145)、[PropertyKeyBuilder:290](https://github.com/apache/hugegraph/blob/b12425c2032bf0d21a97b8221f42a18055c2982f/hugegraph-server/hugegraph-core/src/main/java/org/apache/hugegraph/schema/builder/PropertyKeyBuilder.java#L290)、[VertexLabelBuilder:344](https://github.com/apache/hugegraph/blob/b12425c2032bf0d21a97b8221f42a18055c2982f/hugegraph-server/hugegraph-core/src/main/java/org/apache/hugegraph/schema/builder/VertexLabelBuilder.java#L344)。官方[1.7权限API](https://hugegraph.apache.org/versions/1.7/docs/clients/restful-api/auth/)与源码角色入口对应；没有据此声称所有后端都具备跨请求原子事务。
-- JanusGraph [事务限制:13](https://github.com/JanusGraph/janusgraph/blob/3b8843ffc6c81cf0076bf00119f1ffe80b9cf234/docs/basics/transactions.md#L13)、[约束锁:13](https://github.com/JanusGraph/janusgraph/blob/3b8843ffc6c81cf0076bf00119f1ffe80b9cf234/docs/advanced-topics/eventual-consistency.md#L13)、[ghost:167](https://github.com/JanusGraph/janusgraph/blob/3b8843ffc6c81cf0076bf00119f1ffe80b9cf234/docs/advanced-topics/eventual-consistency.md#L167)、[动态多图](https://github.com/JanusGraph/janusgraph/blob/3b8843ffc6c81cf0076bf00119f1ffe80b9cf234/docs/operations/configured-graph-factory.md#L3)、[认证器:30](https://github.com/JanusGraph/janusgraph/blob/3b8843ffc6c81cf0076bf00119f1ffe80b9cf234/janusgraph-server/src/main/java/org/janusgraph/graphdb/tinkerpop/gremlin/server/auth/JanusGraphSimpleAuthenticator.java#L30)。认证不等于授权；本报告未穷尽 TinkerPop 自定义 authorizer 方案，不把“已读认证器未提供每图授权”夸大成引擎永远不能授权。
-- Nebula [属性类型:268](https://github.com/vesoft-inc/nebula/blob/fa928930ab34f150db522933323aa610e54f26e7/src/interface/common.thrift#L268)、[默认授权关闭:45](https://github.com/vesoft-inc/nebula/blob/fa928930ab34f150db522933323aa610e54f26e7/src/graph/service/GraphFlags.cpp#L45)、[PermissionCheck](https://github.com/vesoft-inc/nebula/blob/fa928930ab34f150db522933323aa610e54f26e7/src/graph/service/PermissionCheck.cpp#L44)、[UpdateVertex:36](https://github.com/vesoft-inc/nebula/blob/fa928930ab34f150db522933323aa610e54f26e7/src/storage/mutate/UpdateVertexProcessor.cpp#L36)。官方 [3.8 List](https://docs.nebula-graph.io/3.8.0/3.ngql-guide/3.data-types/6.list/#opencypher-compatibility_1)明确列表/集合/map不能作为持久属性并建议关系建模。TOSS不等于任意多语句来源事务；本报告不在未证明前宣称该版本有全业务事务。
-
-### 不入选的许可对照
-
-按用户要求筛选宽松许可，不把“免费可下载”当成合格：
-
-| 产品 | 官方服务端 LICENSE 证据 | 排除理由 |
-|---|---|---|
-| Neo4j Community 5.26.0 | [c68156e LICENSE](https://github.com/neo4j/neo4j/blob/c68156edf24164435ab1ac257ec633134c2887f7/LICENSE.txt#L1) | GPLv3，与用户明确非 GPL 条件不符；不讨论商业许可替代 |
-| Memgraph 当前核验 commit | [8902f67 BSL](https://github.com/memgraph/memgraph/blob/8902f67683d09577a1c42448ffe0268a5c1a30aa/licenses/BSL.txt#L1) | BSL 1.1及额外使用条件，不纳入本报告 Apache/MIT/BSD 式宽松开源候选；不混同历史到期版本 |
-| FalkorDB 当前核验 commit | [53f78b4 LICENSE](https://github.com/FalkorDB/FalkorDB/blob/53f78b47c618dd2a6936b61bfad9bab7682657c9/LICENSE.txt#L1) | SSPL，不纳入宽松许可证候选；即使其客户端/适配器许可宽松也不改变服务端许可 |
-
-### 决策边界
-
-优先验证已有集成但明显缺合同的 ArcadeDB，以及具备服务化命名空间的 HugeGraph；JanusGraph/Nebula 放在确有大图分布式需求且团队愿意承担新增一致性/模型/运维工作的备选层。这个排序是基于上列已核实开发缺口作的条件性工程建议，不是性能排行。所有候选均未进行100用户/100并发验收，不承诺可承载吞吐。
-
-### ArcadeDB 来源缺口的判定边界
-
-[markers.py:48](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/provenance/markers.py#L48) 在 `UnsupportedProvenanceCapability` 时返回 False，图未标记会留在 ledger 路径；[try_delete_data_by_graph_provenance.py:21](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/graph/methods/try_delete_data_by_graph_provenance.py#L21) 再判 marker。因此本文的“缺15方法”指图内来源方案未适配，不是说当前全部删除API必定抛错。不得把源码未覆盖的 fallback 行为写成已观测数据损坏。
-
-
-### 10.1 各方案的结构差异与演进代价
-
-| 方案 | 当前接入与存储 | 100用户主要风险 | 扩展与演进的实际代价 |
-|---|---|---|---|
-| PG demo | 已有SQL图表adapter，多个高级方法缺失 | 同库固定图写锁、多跳往返、向量索引与共享资源 | 字段表达简单；需补状态/检索/迁移，不能以demo替生产承诺 |
-| PG＋AGE | PG内图扩展；尚无Cognee adapter | PG连接/私有拓扑缓存、热点业务键、权限与来源并发 | 可复用PG运维基础；需完整adapter/codec/handler，固定版本避免方言漂移 |
-| Ladybug | 已有47方法；本地嵌入式文件与owner子进程 | 同文件所有权、串行执行、进程级限额、统计错误 | 最少新增接入代码；水平扩展要按dataset分owner，单共享图HA并不自动获得 |
-| ArcadeDB | 服务型库＋旧社区插件 | 缺handler/选库、来源与状态合同、错误metrics、热点写 | 服务端有事务/权限/HA实现基础；插件要升级补齐，不能仅换Bolt URL |
-| HugeGraph | 服务型Gremlin/REST；本轮未见现成Cognee adapter | 来源并发、命名空间资源、所选后端事务/HA | 重新实现查询合同；固定schema/关系映射和handler |
-| JanusGraph | Gremlin＋外部存储/索引 | 后端一致性、跨行来源维护、锁、授权 | 规模化组件可选，但事务恢复和多组件运维范围明显扩大 |
-| NebulaGraph | nGQL＋space与分布式存储 | 持久集合缺失、权限默认关闭、多语句事务未证明 | 要重做属性/来源建模，不能仅翻译Cypher字符串 |
-
-这张表比较已有接点与必须承担的工程工作，不是性能排名。所有服务型候选仍需实测连接池、资源配额、同图竞争和失败恢复；服务端能接受100个连接不等于100个Cognee用户的请求都能按SLA完成。
-
-
 <a id="agent-cost"></a>
-## 11. 全Agent开发成本：按代码范围估预算，按实跑校准
+## 6. 怎么开发、多少工作量：先验证底层，再按业务交付
 
-以下所有开发、测试、评审、修复和文档都由Agent完成。源码可以证明工作包存在，无法证明Agent在几小时内完成；因此数字是资源预留，不是已测速度或固定交付报价。100用户生产SLA尚无输入数据与压测证据，不纳入“标准功能验收版已交付”的承诺。
+**本章结论：主要开发在Cognee适配层，当前没有证据表明本范围必须修改AGE内核。全部由Agent开发，原完整范围暂按80～170 Agent小时、3～6自然日预留；这是包含基础连通性统计的未校准预算，不是已经交付或性能达标的承诺。**
 
+### 6.1 具体改哪里
 
-### 11.1 AGE：W1到W7
-
-本项目按用户要求采用 **Agent 完成代码实现、测试编写与执行、代码评审、修复、文档和集成**。不配置人工编码岗位，也不预设人工逐行审查是必经关卡。需求取舍、无法自动取得的资源权限、最终业务验收如需用户参与，单独记录等待，不算人工开发工作量。
-
-此前传统人工人日估算**撤回作为本项目排期依据**，不按某个所谓Agent提速倍数折算。源码支持的是W1～W7工作清单；下面小时和日历天是按任务依赖建立的**初始预算，尚无本项目Agent开发实测速率支撑**，需要W1实跑校准。
-
-**基准配置与单位：**最多4个并发Agent＝1个协调/集成Agent＋2个实现Agent＋1个独立验证/评审Agent。固定PG18＋AGE1.8，测试数据库、依赖安装、模型/API额度可用，可以持续运行；计时从这些条件具备后开始。不包括等待云厂商开放AGE扩展，亦不默认需要改AGE内核。
-
-- **Agent占用小时**：一个Agent执行任务所占的时间，包含其工具调用、局部测试和修复周期；两个Agent各工作1小时算2小时。它不是人小时，也不是模型纯推理时间。
-- **日历时间**：从开始到所定义交付范围完成的墙钟时间；并行任务会重叠，不能把所有Agent小时直接相加成工期。
-- **费用**：实际模型输入/输出及缓存token、测试实例、CI资源分别计量。当前没有指定模型/价格与实跑token日志，不编造人民币或美元报价，也不假定Agent小时能直接换算token。
-
-| 工作包 | 实际代码范围与交付证据 | 主执行Agent占用预算 | 前置条件与并行方式 |
-|---|---|---:|---|
-| W1 目标组合PoC与合同冻结 | 实跑agtype/参数、UUID唯一索引、双会话MERGE、边三元组、邻域；固定codec/执行器/字段合同 | 6～12小时 | 第一阶段；验证Agent可同时准备对照数据与失败用例 |
-| W2 连接、codec、CRUD | age/adapter.py、codec.py；批量、异常、冲突恢复和返回格式测试 | 8～16小时 | W1之后由实现A负责；与W3并行 |
-| W3 schema、索引、handler、隔离 | schema.py、DatasetHandler、注册/配置；生命周期和多dataset隔离测试 | 6～12小时 | W1之后由实现B负责；与W2共享已冻结合同 |
-| W4 来源、rollback、增量 | 15个来源/metadata方法＋detag/chunk更新；共享删除、回滚和补偿用例 | 10～20小时 | W2/W3基础可用后，A负责；可与W5/W6并行 |
-| W5 feedback、truth、update_node、Temporal | 7状态接口＋2时间方法；epoch、状态保留和事实有效期测试 | 8～16小时 | 同上，B先负责；状态字段合同不能临时各自定义 |
-| W6a图读/分页；W6b摘要/基础metrics | W6a：6图读、ID筛选、分页和参考结果对照；W6b：摘要计数/失败隔离、WCC与统计合同 | 合计6～12小时，原预算未单独测量 | W6a是记忆检索验收项；W6b按摘要/分析启用范围独立验收。原完整排期仍由B在W5后完成两部分 |
-| W7 端到端、故障、代表性性能、文档 | cognify/search/forget/update/improve闭环；冷热、重连、并发和恢复记录 | 8～16小时 | 所有必需模块合入后，验证Agent主执行，实现Agent处理发现的问题 |
-| **W1～W7主执行合计** | **每包已包含局部测试与常规修复** | **52～104 Agent小时** | **不是52～104小时的串行工期** |
-
-**范围与优先级不是同一件事：**下列80～170 Agent小时、3～6日仍是包含W6b基础统计/WCC的原完整范围预算。将W6a/W6b分开，是为了允许按产品需求分阶段验收，不代表WCC是每次session必需。若先交记忆、后交统计，首轮Agent实跑后单独重估；未有数据前不从总工期机械减去几小时。解除摘要与WCC耦合的具体接口改造，也须在W1明确并校准W6b预算。
-
-独立代码评审/反例验证再预留12～24 Agent小时，协调/集成预留4～8 Agent小时：**常规执行总量68～136 Agent小时**。这里的独立验证不重复计W7已列的端到端运行；它核查实现、补充遗漏反例并复审修复。为新增失败场景和返工另留12～34 Agent小时，资源预算暂取 **80～170 Agent小时**。以上均为调度假设，不是已经消耗或测得的时长。
-
-**为什么不能让4个Agent把任务一分，立刻并行到底？**
-
-UUID索引、agtype解码和参数通道没跑通时，来源、反馈、检索都无法对真实数据库验收；各自编写mock不能替代这个依赖。若多个Agent同时改同一个大adapter文件，也会增加冲突。实际开发应指定文件所有者，把来源/状态/图读拆为私有模块或通过隔离分支合入，公共adapter入口由一个所有者集成。拆分是待实施组织方案，不代表已经改过源码。
+AGE通过PG连接执行图查询，返回`agtype`（AGE用于节点、边和属性值的数据类型）。新适配器需要编码参数、解码结果，并保持Cognee的对象格式；不能直接把原Neo4j驱动换个地址。
 
 ```mermaid
 flowchart LR
-    P[W1 实跑与冻结合同] --> A[W2 连接与CRUD]
-    P --> B[W3 schema与隔离]
-    A --> S[基础联合通过]
-    B --> S
-    S --> C[W4 来源与增量]
-    S --> D[W5 学习与时间]
-    D --> E[W6a 图读 / W6b 统计分别验收]
-    C --> I[W7 端到端与故障验证]
-    E --> I
+    U[现有remember、recall、improve] --> I[现有图接口]
+    I --> A[新增AGE适配器]
+    A --> C[连接执行器与参数、结果转换]
+    C --> G[PG18加AGE1.8]
+    H[数据集生命周期处理器] --> A
+    H --> S[创建、权限、索引、删除]
+    T[摘要入口：按需解耦] --> A
 ```
 
-按这条依赖链，理想关键路径为 `W1 + max(W2,W3) + max(W4,W5+W6) + W7`，即 **36～72小时**。它假定接口稳定、资源可用及评审没有打回基础设计。给集成返工、真实数据库用例和运行波动留出日历余量后，**标准功能验收版暂预留3～6个自然日**。这是持续运行下的预算；仅工作时段运行、单Agent顺序执行或额度限流时，不能沿用这组日历天数。
-
-| 交付层级 | 当前Agent排期口径 | 达到什么，不混作什么 |
+| 开发位置 | 做什么 | 为什么可行、还有什么须验证 |
 |---|---|---|
-| 可复现PoC | W1主执行6～12小时，校准前按约半天～1天观察窗安排 | 核心原语真实跑通；不是47方法和业务闭环已交付 |
-| 标准功能验收版 | **最多4并发Agent，暂排3～6自然日；预算80～170 Agent小时** | 原完整范围含唯一性、3种APOC行为、来源/学习/时间及W6b基础统计；统计与记忆分开验收，不据此将所有能力划成同一优先级 |
-| 生产上线与任意查询兼容 | 暂不报固定天数 | 缺目标数据规模、SLA、部署和迁移清单；不能把生成代码完成当作生产验收 |
+| 新增`graph/age/`适配器及连接模块 | 接入工厂、管理连接、参数和agtype结果；实现节点/边读写 | AGE有原语，Cognee有接口；仍须真实验证编码、取消、断连、错误和事务 |
+| 新增图模型及索引初始化 | 固定业务类型表达、UUID索引、边身份、来源与学习字段 | 数据可表达；索引表达式、并发唯一性和升级路径须实测 |
+| 新增数据集生命周期处理器（handler） | 创建/解析/删除每个数据集的图，绑定用户权限与连接缓存 | Cognee已有注册接点；只注册适配器不会自动得到多租户 |
+| 来源、状态与检索模块 | 15项来源方法、反馈/经验对齐/局部更新、时间检索、邻域与分页 | 可复用上层规划和算法；必须保持现有业务合同而非仅让函数不报错 |
+| 按需修改摘要入口 | 将计数与结构算法分离，明确失败状态 | 需要改调用及消费合同，不属于只新增后端文件即可完成的部分 |
+| 公开查询及自然语言查询 | 方言提示、参数、返回格式和能力限制 | 独立选配；不能让模型继续生成不支持的Neo4j/APOC语法 |
 
-**哪些选配仍要另算，但也全部由Agent完成？**
+源码接点：[适配器工厂][graph-factory]、[数据集处理接口][dataset-handler]、[AGE驱动参考][age-python]。若用同步驱动，须隔离执行以免阻塞应用；不能假定驱动解码可直接插到现有异步连接里。
 
-| 选配 | 追加主执行Agent预算 | 依赖与边界 |
+建议AGE成为图的唯一权威存储，不再另维护一套普通PG图表并异步复制。向量与关系元数据仍沿现有适配器；同一PG服务器不自动把这些调用合成一个事务。旧数据迁移须保留UUID、来源和学习状态，重建索引并核对，改provider配置不会自动搬数据。
+
+### 6.2 全Agent任务与预算
+
+一个Agent小时指一个Agent被任务占用一小时；四个Agent各运行两小时是8 Agent小时，不是8小时日历工期。这里按最多4个并发Agent：1个协调、2个实现、1个验证；设计、代码、测试、评审、修复均由Agent执行。
+
+| 工作包 | 完成什么才算交付 | 主执行预算 |
+|---|---|---:|
+| W1：真实数据库概念验证 | 对应版本可安装；参数/结果、UUID索引、并发匹配创建、邻域样例跑通 | 6～12小时 |
+| W2：连接与基本读写 | 连接、编码解码、三种APOC等价行为、批量错误与重试 | 8～16小时 |
+| W3：模型、索引与隔离 | 数据集创建删除、权限、索引、并发身份和缓存归属 | 6～12小时 |
+| W4：来源与增量更新 | A/B共享事实撤回、失败运行补偿、位置与分组更新 | 10～20小时 |
+| W5：学习与时间状态 | 4个反馈接口、2个经验对齐接口、局部更新及2个时间检索方法 | 8～16小时 |
+| W6a：图读取；W6b：统计 | a验邻域、分页、过滤；b验计数、失败状态与WCC，分别验收 | 合计6～12小时 |
+| W7：整体链路和故障验证 | 写入、读取、撤回、更新、学习闭环；重连、失败恢复与代表性负载 | 8～16小时 |
+| 主执行合计 | 已含局部测试和常规修复 | **52～104小时** |
+
+另留独立评审/反例验证12～24小时、协调集成4～8小时、新增问题返工12～34小时，合计暂取**80～170 Agent小时**。这些数字是按工作范围分解的资源预算，源码本身不能证明Agent开发速度。
+
+```mermaid
+flowchart LR
+    P[W1验证并冻结合同] --> A[W2连接和写入]
+    P --> B[W3模型和隔离]
+    A --> J[基础联合通过]
+    B --> J
+    J --> C[W4来源和补偿]
+    J --> D[W5学习与时间]
+    D --> E[W6a图读与W6b统计]
+    C --> F[W7整体与故障验证]
+    E --> F
+```
+
+按依赖链，理想执行路径约36～72小时；给联调和返工留余量，完整范围先排**3～6自然日**。前提是环境、模型额度可用且持续运行。不是把总Agent小时除以4，也不是四个人工人日的换算。
+
+**范围与优先级要分开：**这个预算包含W6b基础WCC，但普通记忆首期可以不开放统计。若缩减范围，应在W1实际运行后重估，不能机械减去几小时。摘要解耦的上层改动也要计入，不能漏算。
+
+| 额外范围 | 初步追加预算 | 边界 |
 |---|---:|---|
-| O1 受限公开AGE raw Cypher | 4～8小时 | 稳定query/codec之后；公共参数、返回列、权限、取消和错误协议 |
-| O2 AGE自然语言查询 | 8～16小时 | 依赖O1或同等通道；prompt/schema和查询生成语料回归，受模型/API吞吐影响 |
-| O3 全点对路径/聚类等昂贵统计 | 6～12小时 | 仅业务要求并启用时实施；可与O1/O2并行，仅验有界数据，不含大图SLA；不阻断未承诺这些指标的普通记忆交付 |
-| O1～O3合计 | **18～36主执行Agent小时** | 另留独立评审及跨功能集成时间；不能直接加成自然日 |
-| 旧图迁移、用户自定义Task/过程、生产HA及AGE内核修改 | 按实际清单和首轮实跑再估 | 交给Agent执行不意味着未知范围可以免费或瞬时完成 |
+| 受限公开AGE查询 | 4～8主执行Agent小时 | 参数、返回列、权限、取消和错误协议 |
+| 自然语言生成AGE查询 | 8～16小时 | 依赖查询通道，需提示和查询样本回归 |
+| 昂贵图统计 | 6～12小时 | 只对明确有界数据验证距离/聚类，不含大图性能目标 |
+| 三组选配一起交付 | 合计18～36主执行小时；含联调暂增1～2自然日 | 原完整范围加选配暂为4～8日，仍须实际校准 |
+| 生产高可用、迁移、任意第三方任务 | 暂不报固定总量 | 缺部署、恢复目标、数据量和任务清单，不编造时间 |
 
-O1→O2有依赖，O3可以另一路执行；基准资源释放后，含评审联调可先为这组选配预留 **额外1～2自然日**，合并预算 **4～8自然日**，同样须通过PoC与生成查询回归实跑校准。它不继承此前人工人日估算，也不承诺任意APOC/GDS库兼容。
-
-**首轮校准必须记录什么：**W1完成时保存实际Agent占用、工具/数据库等待、token量、失败/修复轮次和通过用例，重估W2～W7。若UUID索引/并发、agtype或RLS实测暴露基础阻断，则修改方案和预算，不靠再增加几个Agent掩盖问题。数据库查询耗时、锁竞争、冷缓存、故障恢复仍要真实执行，不能以Agent自述“已实现”替代证据。
-
-要声称交付范围“支持”，至少需要：47方法逐项标注实现/明确不支持；内置所选业务全链路通过；缺省capability不误开；不同dataset隔离通过；并发upsert与来源删除正确；feedback/truth重建不丢；用同数据与参考后端比较邻域结果；对目标规模记录冷热P95、内存、写入和并发结果。当前没有这些运行证据，所以本报告结论停留在**有源码依据的适配可行性与工作范围**。
-
-### 11.2 Ladybug：已有adapter不等于零成本
-
-以下只是全Agent的未校准任务预算，不是源码证明的速度，不能作为交付承诺。设计、实现、测试、评审、修复均Agent执行。
-
-|范围|具体工作|初步Agent占用小时|预算边界|
-|---|---|---|---|
-|L1 默认单owner验证|100用户授权隔离、队列/冷热cache监控、读写回放、重启恢复、资源调参|12–24|已有环境/数据，不含修重大引擎bug|
-|L2 统计正确性修复|修WCC/shortest/clustering、拆开错误返回、孤点/链/环/多组件fixture与复核|12–24|先限定精确小图/可选大图统计预算，不能默认全图APSP无限制|
-|L3 基础独立复核/整合|独立Agent审计、错误注入复测、部署文档|6–12|不重复L1正常测试|
-|L1+L2+L3|可并行L1/L2后汇合|30–60|最多4Agents，约1–3自然日资源预算，须首轮实跑后重估|
-|L4 选定路线的架构PoC|路线A：独立dataset跨机owner路由；或路线B：单图唯一owner服务、remote合同/读调度/整操作一致性；参见9.3/9.4|8–16，仅首轮PoC预算|冻结所选路线，跑两API访问、来源交错、重启/迁移，再估实现与验证总量；不包含复制/自动HA|
-
-不能把Ladybug无新adapter解读成零成本，也不能以本次小图实验宣称100用户压测已通过。Token成本缺实际模型与使用日志不造数字。
-
-### 11.3 其他候选与费用如何计量
-
-ArcadeDB虽已有CRUD，缺口仍横跨版本依赖、handler、来源15接口、状态7接口、Temporal、分页/增量及metrics；HugeGraph/JanusGraph/Nebula还需要新的查询与模型映射。没有这些路线的Agent实跑日志，不能直接套AGE的3～6天，也不能凭插件存在断言更便宜。先完成同一组身份/来源/权限/检索PoC，再用实际Agent小时、修复轮次与数据库耗时重估。
-
-货币成本应按实际输入token、输出token、缓存用量乘所用模型价格，再加数据库实例、CI/磁盘/流量等实际用量。Agent占用小时不是token计费单位。当前未指定模型与生产硬件，不编造人民币金额；额外等待云厂商开放AGE也不计成Agent编码小时。
-
+首轮验证必须记录实际Agent占用、工具等待、模型用量和修复轮次，再修订预算。货币成本还需模型价格及实例资源，不能直接由Agent小时推成人民币金额。
 
 <a id="acceptance"></a>
-## 12. 可执行的选型与验收顺序
+### 6.3 分阶段验收，避免把统计缺失当成所有功能失败
 
-**独立dataset多：保留Ladybug，单机先验收；总量增长后按第9.3节做dataset到owner的跨机分片。单个共享图但接受单owner：先测实际负载，必要时按第9.4节服务化与改造读调度。**两条路线均不自动获得同图多writer扩展或数据库HA，不能以100注册用户作为换库依据。
+| 交付阶段 | 用什么例子验收 | 不通过的含义 |
+|---|---|---|
+| 部署可行 | 固定组合装好扩展，目标权限下读写及结果解码 | 这条部署路线尚不成立 |
+| 记忆主流程 | 导入A/B，重复写张三，问星河参与者；撤回A仍保留B | 写入、检索或来源合同不合格，不能上线该主流程 |
+| 已启用学习功能 | 学到0.9后重导不退回0.5；事实关闭、时间边界正确 | 对应学习/生命周期功能不可宣称支持 |
+| 摘要展示 | 非空图计数准确；失败不显示假0；缓存与错误路径正确 | 阻断摘要上线，不自动判普通会话不可用 |
+| 连通性和可选指标 | 孤点、链、环、两个团体与独立算法对照 | 阻断相应统计功能；未启用的指标不作统一门槛 |
+| 目标规模 | 私有多图/共享热点分开，混合读写、故障恢复 | 功能正确仍不足以证明100用户或生产响应目标达标 |
 
-**若要求PG运维体系且能安装扩展：并行评估PG18＋AGE1.8的身份、来源、邻域PoC。**如果只是希望消除JOIN，不足以成为选AGE的理由。若标准华为RDS不能安装AGE且不能新增图服务，此路线在部署上即不成立。
+保留会话缓存，以完整记忆功能做测试；自动反馈、后台同步、队列等开关要记录。普通插件流程、显式摘要请求、昂贵统计分别测，不能假定每次聊天都有一次全图统计，也不能关闭真实同步负载后声称测到了完整插件。
 
-**同一图要求数据库服务自身HA：优先验证ArcadeDB 26.9.1，先补齐插件合同；同一图明确要求超单机容量或分布式扩写：评估HugeGraph 1.7.0及JanusGraph/NebulaGraph。**这是按架构需求确定验证顺序，尚非生产性能结论。ArcadeDB的HA不能当成已证明单图自动分片；仅多API访问而无HA要求，也可以采用Ladybug单owner服务，无须据此强制换库。
+**最终建议：若能自管PG扩展且希望沿用PG运维体系，先做PG18＋AGE1.8的W1验证；通过后实现记忆必需合同，统计分期。若必须只用不开放AGE的托管实例，或要求同图自动跨机扩展，则先解决部署/架构条件，不应直接启动完整适配。**
 
-### 12.1 所有后端使用同一套“业务正确性”用例
+<a id="ladybug"></a>
+<a id="alternatives"></a>
+## 附录A. AGE不合适时，其他图库怎样选择
 
-| 关卡 | 输入/操作 | 必须得到什么 | 不通过的含义 |
-|---|---|---|---|
-| 身份 | 两个会话重复写同UUID、同边；名称发生变化 | 一个业务对象，属性按合同更新；反向/不同类型边保留 | 底层能MERGE仍不满足幂等，不能迁生产数据 |
-| 状态 | feedback=0.9、已关闭valid_to后重新导入 | 按明确规则保留/失效；显式reset可用 | 重复摄入在破坏学习与历史 |
-| 来源 | A/B共同支持事实，删A、回滚失败run | 保留B，撤销仅本次run贡献 | 图可查但知识生命周期不可信 |
-| 检索 | 孤点、链、环、hub、同名实体、NodeSet | UUID/方向/深度/诱导边/过滤一致 | 问答可能使用不完整或错误上下文 |
-| 学习 | 正负反馈、truth部分失败和epoch发布 | 逐ID成功结果真实；不支持明确跳过 | capability存在却没有有效学习 |
-| 时间 | 区间端点、UTC毫秒、空时间、跨区间事件 | 符合当前Timestamp→Event合同；区间相交改进另测 | 存日期字段不等于Temporal支持 |
-| 摘要（启用时） | 图非空、缓存命中/未命中、计数失败、结构统计不可用 | 准确计数；失败不伪装0；不因未启用的WCC/APSP被阻断 | 管理页可能把已有记忆误显示为空；未启用摘要不阻断普通会话 |
-| 结构指标（启用时） | 孤点、3/5节点链、三角尾、六节点教学图 | 已承诺的WCC/optional指标与精确算法一致；未支持明确标识或入口关闭 | 只阻断相应统计功能验收，不能统一阻断正常入图/检索；也不能声称完整metrics兼容 |
-| 租户 | 甲乙相同UUID，不同dataset；共享授权与未授权 | 私有不串数据，共享正确绑定owner | 单图功能通过仍不代表100用户隔离成立 |
-| 故障 | graph成功vector失败、断连、取消、进程退出 | 可重试可恢复，来源不误删 | 同实例/同服务没有提供所需业务原子性 |
-| 迁移 | 导出→目标导入→查询/删除/学习对照 | UUID、来源、状态、向量索引及ACL全部核对 | 改provider不能视为已迁移完成 |
+**结论：Ladybug减少新接入工作，服务型图库可提供不同的部署基础；没有一个候选已被本报告证明能直接满足全部业务及100用户目标。**此附录保留备选结论，不改变正文的AGE实施主线。
 
-### 12.2 “100用户”必须转换为可重放的负载，而不是一个数字
+许可按用户要求筛选，排除通用公共许可证（**GPL**，具有较强衍生分发义务的开源许可证）。MIT许可证（一种宽松开源许可）和Apache-2.0许可证属于本报告接受的许可范围；服务端与客户端依赖的许可需分别看。
 
-分别建立100用户各1dataset、100用户共享1dataset，以及每用户多个dataset的样本；请求并发从1、6、20到100逐档提高。这里是测试输入，不是已通过容量。每档固定并公布节点/边/chunk数、平均及最大度、写入批次、读取深度、共享热点比例和LLM配置。
+| 候选固定版本 | 能解决什么 | 当前缺口与选择边界 |
+|---|---|---|
+| Ladybug0.19.0，MIT | 当前Cognee已有47项图接口实现及额外时间方法，无需从零开发适配器 | 嵌入式文件由唯一读写owner（数据库持有进程）持有；增加API进程不等于同图多写入者水平扩展或自动故障切换。独立数据集可设计按owner分片；单热点图仍须验证容量 |
+| ArcadeDB26.9.1，Apache-2.0 | 服务端有数据库路由、事务和复制/故障切换基础 | 社区适配器仍依赖旧Cognee，缺数据集处理、来源、学习及正确统计等；优先作为服务型候选验证，不能直接切换；复制不等于单图自动分片 |
+| HugeGraph1.7.0，Apache-2.0 | 有服务化及集群部署路径 | 需新适配器；命名空间隔离依赖部署分支，不能只按接口路径推断；来源并发和恢复须验证 |
+| JanusGraph1.1.0，Apache-2.0 | 可组合外部存储构建分布式图服务 | 外部后端的事务/锁约束增加一致性和运维工作；不因100注册用户就优先引入 |
+| NebulaGraph3.8.0，Apache-2.0 | 有分布式图服务基础 | 需新适配器；所核版本持久属性不能直接当集合使用，来源/分组需重建模型；权限与多对象失败恢复另验 |
 
-**负载也按调用路径拆开：**普通Claude插件的会话采集、recall和条件触发improve是一组；定制客户端主动请求摘要的缓存命中/未命中是一组；WCC与optional昂贵统计再单列。不能假定每轮聊天都会运行GDS，从而把全图统计成本摊到所有session；也不能关闭真实存在的自动improve后声称测到了完整插件负载。
-
-分别记录排队时间、数据库执行、图结果传输、应用排序、embedding/LLM耗时，以及P50/P95/P99、错误率、RSS、CPU、连接数、文件句柄、缓存命中和冷启动。数据库慢与LLM慢必须能区分。对同dataset混合remember/recall/improve/forget/update，再做进程重启、连接中断、缓存驱逐与备份恢复。
-
-保留`CACHING`以测完整记忆系统；`AUTO_FEEDBACK`开关要单独报告，不混用配置比较；保留dataset queue并记录限额，不把关闭限流后的短时吞吐当作稳定容量。[会话配置](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/cache/config.py#L32)、[队列实现](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/dataset_queue/queue.py#L1)。若目标SLA没有给定，报告实测分布，不能替用户臆定通过线。
-
-### 12.3 本轮完成与未完成
-
-完成：三个子Agent分工读码；AGE版本/47方法/过程依赖复核；Ladybug依赖版本与锁/队列审计；四种候选及排除项的固定许可证核查；Ladybug原metrics查询最小复现；独立Agent与主Agent交叉审阅。
-
-未完成：AGE编译与集成、完整Cognee＋LLM闭环、100用户压测、华为云目标实例安装检查、其他候选服务端运行、生产HA/迁移/恢复。源码与上游expected只是已有实现证据，不是本轮数据库测试通过记录。本文列明的全部缺口均有处理路径或明确阻断条件；这不代表穷尽所有后端语法及未来自定义任务。
-
+固定源码依据：[Ladybug许可][ladybug-license]、[文件锁][ladybug-file-lock]、[Ladybug写事务][ladybug-transactions]、[ArcadeDB服务端][arcade-ha]与[社区适配器][arcade-adapter]、[HugeGraph部署分支][hugegraph-space]、[JanusGraph事务约束][janus-transactions]、[Nebula属性类型][nebula-types]。Neo4j Community5.26采用GPL；Memgraph所查版本为Business Source License（**BSL**，带使用条件的源码可用许可），FalkorDB为Server Side Public License（**SSPL**，含服务提供义务的许可），不作为本报告的宽松许可候选。[许可对照][neo-license]、[Memgraph许可][memgraph-license]、[FalkorDB许可][falkor-license]。
 
 <a id="reproduction"></a>
-## 附录A：Ladybug统计的最小复现方法
+Ladybug结论针对普通平台的0.19.0依赖，旧macOS条件版本未覆盖。它也不是零风险：此前已用其0.19.0引擎执行当前适配器原统计查询，发现孤点/链图的连通性结果错误、聚类查询报错，外层可能返回假零。影响统计，不证明普通图存储失败。原实验使用小内存配置，不是100用户容量测试；[复现脚本与结果保留在已提交历史版本][ladybug-repro]。单owner验证、统计修复和复核原预算30～60 Agent小时、1～3日，不包含跨机路由、服务化或自动故障切换。
 
-在固定Cognee源码目录，用隔离环境安装`ladybug==0.19.0`后执行下列脚本。它从原adapter提取查询，创建简化Node/EDGE拓扑，不安装完整Cognee依赖，不调用LLM。Windows上的`cognee_db_workers`导入用于注册与该源码相同的OpenSSL加载处理。测试配置与正文相同；脚本用于复现正确性问题，不能作为容量基准。
+**备选判断：多独立图且接受单owner时可先验Ladybug；共享图要求数据库自身故障切换时先验ArcadeDB；明确超过单机容量才深入分布式候选。所有候选仍需通过正文同一组业务测试。**
 
-```python
+<a id="interface-inventory"></a>
+## 附录B. 适配范围核对：47项图接口与额外功能
 
+**结论：不能只统计类里实现了多少方法，必须看启用的业务链是否经过验证。**当前接口有21个抽象方法及26个带默认实现的方法；后者有些默认明确不支持，有些退回全图读取。
 
-import ast,json,sys
-from pathlib import Path
-sys.path.insert(0, str(Path.cwd()))
-import cognee_db_workers
-import ladybug
-p=Path('cognee/infrastructure/databases/graph/ladybug/adapter.py')
-t=ast.parse(p.read_text(encoding='utf-8'))
-names=['_get_num_connected_components','_get_size_of_connected_components','_get_shortest_path_lengths','_get_avg_clustering']
-queries={}
-for n in ast.walk(t):
-    if isinstance(n,ast.AsyncFunctionDef) and n.name in names:
-        for a in n.body:
-            if isinstance(a,ast.Assign) and any(isinstance(v,ast.Name) and v.id=='query' for v in a.targets): queries[n.name]=ast.literal_eval(a.value)
-results={'version':ladybug.__version__,'method':'AST extraction of exact Cognee query strings; direct Ladybug Connection; not full adapter/integration test','queries':queries,'cases':[]}
-for label,count,edges in [('singleton',1,[]),('chain3',3,[(0,1),(1,2)]),('chain5',5,[(0,1),(1,2),(2,3),(3,4)]),('triangle_tail',4,[(0,1),(1,2),(2,0),(2,3)])]:
-    db=ladybug.Database(':memory:',buffer_pool_size=67108864,max_db_size=268435456,max_num_threads=2)
-    c=ladybug.Connection(db)
-    c.execute('CREATE NODE TABLE Node(id STRING PRIMARY KEY)')
-    c.execute('CREATE REL TABLE EDGE(FROM Node TO Node)')
-    for i in range(count): c.execute('CREATE (:Node {id:$id})',{'id':str(i)})
-    for a,b in edges: c.execute('MATCH (a:Node {id:$a}), (b:Node {id:$b}) CREATE (a)-[:EDGE]->(b)',{'a':str(a),'b':str(b)})
-    case={'graph':label,'nodes':count,'edges':edges,'queries':{}}
-    for name,q in queries.items():
-        try:
-            r=c.execute(q)
-            rows=[]
-            while r.has_next(): rows.append(r.get_next())
-            case['queries'][name]={'rows':rows}
-        except Exception as e: case['queries'][name]={'error':str(e)}
-    results['cases'].append(case)
-    c.close();db.close()
-print(json.dumps(results['cases'],ensure_ascii=False,indent=2))
+| 分组 | 方法 | 数量 |
+|---|---|---:|
+| 生命周期/查询 | `is_empty`、`delete_graph`、`query` | 3 |
+| 节点 | `add_node`、`add_nodes`、`delete_node`、`delete_nodes`、`get_node`、`get_nodes` | 6 |
+| 边 | `add_edge`、`add_edges`、`has_edge`、`has_edges`、`get_edges` | 5 |
+| 图读 | `get_graph_data`、`get_neighbors`、`get_nodeset_subgraph`、`get_connections`、`get_neighborhood`、`get_filtered_graph_data` | 6 |
+| 统计 | `get_graph_metrics` | 1 |
+| 来源附加/移除 | `attach_node_source_refs`、`attach_edge_source_refs`、`remove_node_source_refs`、`remove_edge_source_refs` | 4 |
+| 来源删除准备 | `delete_edge_triples`、`get_node_delete_data`、`get_edge_delete_data` | 3 |
+| 来源索引 | `find_nodes_by_source_ref`、`find_edges_by_source_ref`、`find_node_source_refs_by_dataset`、`find_edge_source_refs_by_dataset`、`find_node_source_refs_by_pipeline_run`、`find_edge_source_refs_by_pipeline_run` | 6 |
+| 图元数据 | `set_graph_metadata`、`get_graph_metadata` | 2 |
+| 增量/分组 | `remove_belongs_to_set_tags`、`update_chunk_index` | 2 |
+| 反馈 | `get_node_feedback_weights`、`set_node_feedback_weights`、`get_edge_feedback_weights`、`set_edge_feedback_weights` | 4 |
+| 经验对齐 | `get_node_truth_state`、`set_node_truth_state` | 2 |
+| 局部更新/分页/可视化种子 | `update_node`、`get_triplets_batch`、`get_top_degree_node_ids` | 3 |
 
-```
+另有时间检索要求的`collect_time_ids/collect_events`；`get_id_filtered_graph_data`缺失时可能退回全图读取。接口清单是实现检查范围，**不是要求首期开放所有统计或任意查询**：未启用能力仍须明确关闭入口或返回可识别的不支持状态，不能只留空实现。[接口定义][graph-interface]、[时间调用][temporal]。
 
-## 附录B：AGE固定源码基线
+### improve九阶段：避免继续用“部分支持”概括
 
-| 源码组合 | 固定提交 |
+下表说明当前普通PG演示适配器，而不是AGE已开发完成；它帮助识别新AGE适配器要承接什么。
+
+| 阶段 | 当前普通PG图适配器的代码边界 |
+|---|---|
+| `feedback_weights`：图权重学习 | 缺4个权重读写方法，正常能力检查后跳过 |
+| `persist_session_qa`：持久化问答 | 有写入路径；需新内容及正常构图链 |
+| `persist_agent_traces`：持久化轨迹反馈 | 有路径；不是保证所有原始工具轨迹都入图 |
+| `extract_agent_context`：提取经验上下文 | 此阶段写会话上下文，不依赖上述图权重方法 |
+| `distill_sessions`：蒸馏经验 | 有路径；需要可蒸馏输入，再调用构图 |
+| `update_user_preferences`：用户偏好 | 有兼容路径，缺局部更新时可回退完整写入 |
+| `build_truth_subspace`：经验对齐空间 | 缺2个状态方法；需显式启用，正常检查后跳过 |
+| `triplet_enrichment`：三元组向量索引 | 默认任务有路径，需启用相关配置；自定义任务另审 |
+| `global_context_index`：层次摘要索引 | 有路径，需显式启用及有效输入；大图成本另测 |
+
+依据：[阶段注册][improve-registry]、[阶段实现][improve-stages]、[能力探测][capabilities]。实际结果还取决于配置、会话和新内容；不能把“七项有路径”写成生产可用率。事实关闭另需`update_node`，当前普通PG实现的缺口不会因其他阶段有回退就消失。外部Graphiti运行时、任意自定义任务和原始查询不在默认完整兼容承诺内。
+
+## 附录C. 证据与验证边界
+
+**结论：已完成版本、源码、调用链和小图统计反例核查；未完成AGE集成和生产负载验证。**
+
+| 核查对象 | 固定基线 |
 |---|---|
 | Cognee | `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e` |
-| AGE1.6 / PG14 | `41c08296a4b692adf31ed9507a9a25dad6f9f67f` |
-| AGE1.6 / PG15 | `fa1af8de99d74d32e131c19b62cf580d396eb0ae` |
-| AGE1.6 / PG16 | `2db2f060c4c9265a14d40f007eb8c56febf31e4c` |
-| AGE1.6 / PG17 | `54905a09bf8462f22a87c3adfd2ab5752e5c1e71` |
-| AGE1.7 / PG17 | `e1467f12e0b1d15dd35d3ab93f057a7112d425b8` |
-| AGE1.7 / PG18 | `806fa2ebdb300b3e76ef30cdba61803babbf2683` |
-| AGE1.8 / PG18 | `e43dc1a12b78fba4acef9835b2b10379b8d243b4` |
+| AGE1.6：PG14 / PG15 | `41c08296a4b692adf31ed9507a9a25dad6f9f67f` / `fa1af8de99d74d32e131c19b62cf580d396eb0ae` |
+| AGE1.6：PG16 / PG17 | `2db2f060c4c9265a14d40f007eb8c56febf31e4c` / `54905a09bf8462f22a87c3adfd2ab5752e5c1e71` |
+| AGE1.7：PG17 / PG18 | `e1467f12e0b1d15dd35d3ab93f057a7112d425b8` / `806fa2ebdb300b3e76ef30cdba61803babbf2683` |
+| AGE1.8：PG18 | `e43dc1a12b78fba4acef9835b2b10379b8d243b4` |
+| Claude Code插件1.6.1 | `4d57a36859111b927f08a0b99fe04ccfbc4ed22e` |
+
+版本分支细节、回归预期与未验证边界见[1.6源码矩阵][age16-evidence]、[1.7/1.8源码矩阵][age18-evidence]。AGE本身所核版本为[Apache-2.0许可][age-license]。
+
+尚未完成：真实AGE适配器、完整Cognee与模型链路、100用户压测、目标华为云实例安装、生产迁移和故障恢复。上游测试与源码说明能支持设计判断，不能替代这些交付证据。
+
+[age16-evidence]: evidence/age16-source-matrix.md
+[age18-evidence]: evidence/age17-age18-source-matrix.md
+[graph-interface]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/graph_db_interface.py#L16
+[model-to-graph]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/graph/utils/get_graph_from_model.py#L87
+[node-index]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/index_data_points.py#L53
+[cognee-architecture]: https://docs.cognee.ai/core-concepts/architecture
+[hybrid-neighbors]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/hybrid/entities.py#L60
+[pg-demo]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L879
+[age-releases]: https://dist.apache.org/repos/dist/release/age/
+[age16-release]: https://github.com/apache/age/releases/tag/PG17%2Fv1.6.0-rc0
+[age17-release]: https://github.com/apache/age/releases/tag/PG18%2Fv1.7.0-rc0
+[age18-release]: https://github.com/apache/age/releases/tag/PG18%2Fv1.8.0-rc0
+[release-snapshot]: evidence/age-version-evidence-20260928.json
+[age-path-code]: https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L2798
+[huawei-versions]: https://support.huaweicloud.com/productdesc-rds-pg/zh-cn_topic_0043898356.html
+[huawei-plugins]: https://support.huaweicloud.com/intl/zh-cn/usermanual-rds-pg/rds_09_0045.html
+[age-install]: https://age.apache.org/age-manual/master/intro/setup.html
+[session-cognify]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/memify/cognify_session.py#L62
+[plugin-hooks]: https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/hooks/hooks.json#L15
+[plugin-sync]: https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/_plugin_common.py#L1767
+[node-write]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L328
+[edge-write]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L1238
+[storage-order]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/add_data_points.py#L332
+[pipeline-errors]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/pipelines/operations/run_tasks.py#L292
+[single-edge]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L1125
+[delete-planner]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/unified/provenance_delete_planner.py#L96
+[cognee-graph]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/graph/cognee_graph/CogneeGraph.py#L124
+[capabilities]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/capabilities.py#L23
+[feedback-task]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/memify/apply_feedback_weights.py#L129
+[close-node]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/close_node.py#L21
+[temporal]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/temporal_retriever.py#L128
+[nl-retriever]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/natural_language_retriever.py#L84
+[age-transform]: https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/parser/cypher_clause.c#L5632
+[plugin-statusline]: https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/cognee_statusline_render.py#L1
+[mcp-summary-test]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee-mcp/tests/test_recall_summary.py#L151
+[counts]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L80
+[pipeline-metrics]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/metrics/operations/get_pipeline_run_metrics.py#L59
+[neo-metrics]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2315
+[gds-projection]: https://neo4j.com/docs/graph-data-science/current/management-ops/
+[neo-metric-utils]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/neo4j_metrics_utils.py#L61
+[graph-factory]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/get_graph_engine.py#L344
+[dataset-handler]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/dataset_database_handler/dataset_database_handler_interface.py#L11
+[age-python]: https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/drivers/python/age/age.py#L174
+[ladybug-license]: https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/LICENSE
+[ladybug-transactions]: https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/transaction/transaction_manager.cpp#L55
+[arcade-ha]: https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/server/src/main/java/com/arcadedb/server/HAServerPlugin.java#L27
+[arcade-adapter]: https://github.com/topoteretes/cognee-community/blob/ea5eaa681b8606c9813bb3d4c74553c06e4bb3aa/packages/graph/arcadedb/cognee_community_graph_adapter_arcadedb/arcadedb_adapter.py#L52
+[hugegraph-space]: https://github.com/apache/hugegraph/blob/b12425c2032bf0d21a97b8221f42a18055c2982f/hugegraph-server/hugegraph-api/src/main/java/org/apache/hugegraph/core/GraphManager.java#L1228
+[janus-transactions]: https://github.com/JanusGraph/janusgraph/blob/3b8843ffc6c81cf0076bf00119f1ffe80b9cf234/docs/basics/transactions.md#L13
+[nebula-types]: https://github.com/vesoft-inc/nebula/blob/fa928930ab34f150db522933323aa610e54f26e7/src/interface/common.thrift#L268
+[neo-license]: https://github.com/neo4j/neo4j/blob/c68156edf24164435ab1ac257ec633134c2887f7/LICENSE.txt#L1
+[memgraph-license]: https://github.com/memgraph/memgraph/blob/8902f67683d09577a1c42448ffe0268a5c1a30aa/licenses/BSL.txt#L1
+[falkor-license]: https://github.com/FalkorDB/FalkorDB/blob/53f78b47c618dd2a6936b61bfad9bab7682657c9/LICENSE.txt#L1
+[ladybug-repro]: https://github.com/stefanv5/memory-platform-architecture/blob/ca49b10c1eff5fb7271d2ac3e89eae53b9a938cf/docs/cognee/graph-storage-postgres-analysis.md#L1471
+[improve-registry]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/registry.py#L31
+[improve-stages]: https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/improve/stages.py#L80
+[age-license]: https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/LICENSE
+
+[age-path-limit]: https://github.com/apache/age/blob/e43dc1a12b78fba4acef9835b2b10379b8d243b4/src/backend/utils/adt/age_vle.c#L3677
+[ladybug-file-lock]: https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/storage/storage_manager.cpp#L67

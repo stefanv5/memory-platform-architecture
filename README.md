@@ -2,7 +2,7 @@
 
 基于源码的 AI 记忆平台架构研究：Cognee 云化、多租户、集群、持久化与可替换引擎设计。
 
-- [Cognee图数据库统一报告：PG/AGE版本缺口、业务用例、Ladybug与100用户、非GPL候选及全Agent成本](docs/cognee/graph-storage-postgres-analysis.md)
+- [Apache AGE替代Cognee图后端：能力、缺口、触发流程、改造与Agent成本](docs/cognee/graph-storage-postgres-analysis.md)
 - [竞品全景与 ContextDB 架构（最新）](docs/competitive-landscape/README.md)
 - [Cognee 与 Hindsight：当前架构、代码实现及演进对比](docs/competitive-landscape/05-code-architecture-cognee-vs-hindsight.md)
 - [Cognee 分析目录](docs/cognee/README.md)

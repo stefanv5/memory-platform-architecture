@@ -4,7 +4,7 @@
 
 本轮基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`；Hindsight `12f2d54f643baddacb98cd547c89b1a50c5c3dcc`。
 
-- [Cognee图数据库统一报告：PG/AGE版本缺口、业务用例、Ladybug与100用户、非GPL候选及全Agent成本](graph-storage-postgres-analysis.md)
+- [Apache AGE替代Cognee图后端：能力、缺口、触发流程、改造与Agent成本](graph-storage-postgres-analysis.md)
 - [与 Hindsight 的当前架构及代码实现对比](../competitive-landscape/05-code-architecture-cognee-vs-hindsight.md)：接入、存储、检索、事务、后台演进、性能成本与扩展取舍；先独立介绍两边再比较。
 
 | 版本 | 内容 | 状态 |
