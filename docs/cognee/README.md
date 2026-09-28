@@ -2,7 +2,7 @@
 
 本轮基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`；Hindsight `12f2d54f643baddacb98cd547c89b1a50c5c3dcc`。
 
-- [Apache AGE 兼容矩阵与逐项改造（最新）](apache-age-compatibility-matrix.md)：按 AGE＋PG 发布包列明功能与缺口、华为云主版本和扩展条件，完整盘点47个图接口及接口外调用，给出32～53人日的明确适配范围和选配工作。
+- [Apache AGE 兼容矩阵与逐项改造（最新）](apache-age-compatibility-matrix.md)：按 AGE＋PG 发布包列明功能与缺口；详解UUID/业务边唯一性、3种APOC和7种GDS调用缺失后的具体后果、替代成本与工时归属；盘点47个图接口，区分32～53人日的基础范围和选配工作。
 - [图存储、模块数据流与 PostgreSQL 替换分析](graph-storage-postgres-analysis.md)：图的模块用途、节点与关系模型、向量和图的交互、PG 适配机制、功能边界及华为云 RDS 兼容条件。
 - [PG 图能力的具体实现、改造清单与工作量](postgres-graph-implementation-plan.md)：节点/边/来源如何落表，反馈、truth、局部更新和时间检索的接口契约，生产化问题、华为云落地与分档人日估算。
 - [Apache AGE 真实执行机制与性能背景](apache-age-feasibility-analysis.md)：固定跳 JOIN、VLE 缓存、图存储机制与验证方案；完整版本兼容和工时结论以最新矩阵为准。
