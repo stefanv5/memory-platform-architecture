@@ -15,7 +15,7 @@
 | 哪个 AGE 版本开箱即用支持整个 Cognee？ | 本次核查的版本中没有。Cognee 没有 AGE adapter；1.8 也没有 APOC/GDS 兼容库。 |
 | AGE 是否值得二次开发？ | 固定 PG18＋AGE1.8 有核心原语支持，适配方案可进入验证；它不是保证消除 JOIN 或保证提速的方案。主要开发发生在 Cognee 适配层，未发现本范围必须改 AGE 内核的证据。 |
 | 华为云 RDS 能直接用 AGE 吗？ | 已公开提供相应 PG 主版本，插件清单未列 AGE。客户端适配不能补出服务器缺少的扩展。可另部署图服务，或用 ECS/容器自管 PG＋AGE。 |
-| 不用 AGE，可以用 Ladybug 吗？ | 可以把当前默认 Ladybug 作为优先验证对象：已有业务接口，避免从零开发 AGE adapter；但文件所有权、同库并发、统计语义和进程生命周期必须按后文处理。 |
+| 不用 AGE，可以用 Ladybug 吗？ | **能承担已有图业务；不能直接满足同图跨机多writer/自动HA。** 独立dataset可保留并按owner分片；单热点图要求分布式或HA时进入服务型替代选型。具体决策、两条改造路线与替代方案分列于第9章。 |
 | 100 用户能否共用一个 Cognee？ | 用户数量本身不构成禁止条件。关键是共享还是私有 dataset、同时读写量、进程/文件归属和资源预算；没有“100用户必失败”或“已经支持100并发”的实测结论。 |
 | 是否存在友好非 GPL 候选？ | 有，后文固定版本核查 MIT/Apache-2.0 的 Ladybug、AGE、ArcadeDB、HugeGraph、JanusGraph、NebulaGraph；许可证通过不代表 Cognee 合同或多租户自动通过。 |
 
@@ -951,22 +951,38 @@ AGE Python驱动的连接初始化/agtype loader不是现有asyncpg的即插即�
 全仓另有旧evals对Graphiti基准，直接实例化Graphiti及其Neo4j连接，不是Cognee GraphDBInterface适配要求。[旧基准](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/evals/old/hotpot_qa_24_2025/src/qa/qa_benchmark_graphiti.py#L48)。因此应该写“外部Graphiti运行时/自定义Task不在本报告固定接口交付范围”；不能把历史版本功能判断当作当前SHA事实。
 
 <a id="ladybug"></a>
-## 9. Ladybug能否代替AGE：先看已有实现，再看100用户
+## 9. Ladybug能否替代：明确支持边界，再分别选择改造或换库
 
-AGE需要新增适配器，Ladybug则已经是当前Cognee默认后端。这里要比较的是“完善已接通的嵌入式方案”与“开发PG图扩展方案”，不能只比较两种查询语言。
+**结论：Ladybug可以承担Cognee的图存储与内置业务接口；但当前集成不能直接承担“同一个图跨机器多writer扩展、自动复制与故障切换”的集群要求。大量独立dataset可以继续使用并按dataset分片；单个热点共享图若已明确需要分布式写入或数据库HA，应换路线，不建议继续靠增加Cognee worker来扩容。**
 
+这里的owner指“唯一持有某个图文件读写句柄的数据库进程”，不是登录用户。100人可以访问同一owner，也可以分别访问100个dataset。人数、图数量、请求并发和数据库写并发是四件不同的事。
 
-证据基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`；上游 Ladybug `v0.19.0`=`c934f673b6b1c5b680bdae3295cbd909b5855cef`，MIT LICENSE。Cognee pyproject.toml:74–92 在普通平台固定 ladybug==0.19.0；macOS Ventura/Sonoma 条件依赖>=0.17,<0.18，本报告多用户运行结论针对0.19.0，不能套到旧平台分支。
+本章固定Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e` 与 Ladybug **0.19.0**（`c934f673b6b1c5b680bdae3295cbd909b5855cef`，MIT）。这是普通平台的依赖版本；macOS Ventura/Sonoma使用>=0.17,<0.18，未纳入本章运行验证。[版本依赖](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/pyproject.toml#L74)。
 
-核心结论：Ladybug 是此 SHA 的默认图后端，已有完整业务方法实现，不需要像 AGE 一样从零写图适配器。但“方法齐全”不能等于“统计语义完全正确”，本审计发现 metrics 查询有可由源码直接构造反例的缺陷。100注册用户不能推出100并发查询，更不能推出数据库不支持；应拆分多独立数据集、共享一个数据集、单Cognee进程、多Uvicorn进程。
+### 9.1 决策表：你的“大规模”是哪一种
 
-### 支持清单与结构差别
+表中的“不满足”针对已明确缺失的架构能力；“需要压测”针对源码无法回答的吞吐与容量。不能把二者混为一谈。
+
+| 目标场景 | 当前实现能否直接满足 | 明确建议 | 改造或换库后的边界 |
+|---|---|---|---|
+| 100注册用户，各自少量资料，实际并发与单图规模可由一台机器承载 | **已有功能接入，可进入验收；尚未证明100用户SLA** | 保留Ladybug，先用单Cognee进程、每dataset单owner，做隔离/负载验收 | 无须新写图adapter；仍需处理9.7统计缺陷和失败恢复 |
+| 很多独立dataset，总容量/吞吐需要多台机器 | **现成实现没有跨机分片调度；可改造支持按dataset分散负载** | 走9.3路线A：每个dataset固定owner，多台机器各负责一批图 | 扩展的是独立图的总量；同一个热点图仍在一台机器 |
+| 100人共享一个图，读请求很多，写入可排队，单机资源仍够 | **现成单worker查询串行；是否达标须测，不能直接承诺高并发** | 先测排队与查询耗时；不达标且接受单owner时，走9.4路线B服务化/读调度 | 可以解除API抢文件、改善读取调度；仍未获得多writer集群或HA |
+| 同一个共享图，要求加机器就能分摊写入或超过单机容量 | **不能直接满足；路线A/B也不提供同图分布式分片** | 走9.5分布式候选路线，评估HugeGraph/JanusGraph/NebulaGraph | 必须新适配并验证来源一致性；分布式不保证任意热点写线性提速 |
+| 图服务必须跨机复制，owner宕机后自动接管，并满足明确RPO/RTO | **当前集成不提供这一套HA机制** | 优先验证ArcadeDB服务型替代；已有分布式需求则一起评估上述分布式候选 | ArcadeDB的HA基础不等于同图容量自动分片，也不等于Cognee插件已完整 |
+| 一个图有很多节点/边，但没有给出查询、硬件、并发与SLA | **不能仅凭“百万/千万节点”判支持或不支持** | 先按9.6做单图容量测试；一旦要求超单机分布式能力，按上一对应行选型 | 当前没有可引用的本项目容量基准，不编造节点数或QPS门槛 |
+
+**对应你提出的100用户：若是100个相互独立的知识空间，优先保留Ladybug并验证，增长后按dataset分片；若是100人共用一个企业知识图且明确要求多机HA，优先进入服务型图库适配。若只是100人共用图而无这些集群要求，先测实际读写负载，不因人数直接换库。**
+
+### 9.2 为什么能替代图功能，却不能直接替代集群架构
+
+#### 已有业务实现：不是从零开发
 
 Python AST对比 GraphDBInterface 的47个方法与 LadybugAdapter，47/47均有override，没有接口stub继承缺口。附加Temporal collect_events/collect_time_ids也实现；能力探针modules/improve/capabilities.py:24–25,84–93会认定feedback/truth支持。但探针只判方法覆盖，不测并发正确性与统计语义。基础remember/recall不用Neo4j GDS，缺GDS库不影响Ladybug已经实现的CRUD/邻域检索。
 
 例：Node(id=张三UUID,type=Entity,properties='{"description":"...","belongs_to_set":[...]}')，EDGE端点张三/星河、relationship_name='participates_in'。Ladybug已有自己的Python集合合并和MERGE逻辑，不要求复制Neo4j的apoc.coll.toSet、addLabels、merge.relationship原语。JSON扩展用于json_extract等（adapter.py:544–568）；pyproject.toml:81–90选择0.19.0而非0.19.1正是扩展二进制发布与存储版本匹配原因。自定义原始Neo4j/APOC查询仍不能直接当Ladybug查询执行，NL/query方言路径也需单测，不应把47方法等同任意Cypher兼容。
 
-### 9.1 当前存储与调用架构
+#### 当前数据与调用路径
 
 Ladybug使用统一`Node`表，`id STRING PRIMARY KEY`；`EDGE`存有向关系，关系名是`relationship_name`属性，其他业务属性多保存在JSON字符串。文档/实体的分类通过type和属性表达，而不是Neo4j每种类型的物理label。来源四组字段已经实现，A/B共享事实可以使用现有来源规划；仍要验证并发与故障路径。
 
@@ -987,15 +1003,109 @@ flowchart LR
 这是一种建议先验收的部署方式，不是已完成100用户压测的结果。[schema与执行](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L391)、[worker同步分发](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee_db_workers/harness.py#L419)。
 
 
-### 已核实缺陷：统计是实现存在、语义不保证正确
+#### 规模边界是怎样从代码产生的
 
-adapter.py:3422–3447 把每个节点3跳内邻居列表当组件，缺少完整连通闭包，列表顺序也没有统一归一，孤点因MATCH没有行而消失。教学反例张三—李四—星河—赵六—运维平台是一条5节点链，实际只有1个连通分量，但两端3跳集合不含对端，与中间集合不同，不能保证返回1。只有孤点王五的图实际有1组件；实跑原query返回[[null]]，helper返回None、size列表为空，不是正确的1。影响是监控/可视化组件数和大小误导，并非普通图检索必然失败。必须修复精确WCC或对指标标注近似；不能声称GDS替代已等价。
+| 源码事实 | 用星河项目的例子解释 | 对选型的直接影响 |
+|---|---|---|
+| 默认每个数据库worker持有一个Connection，worker同步派发请求；同Connection有mutex | 100人同时问星河项目，查询要轮流进入这条执行通道；一条查询内部可以用多个线程，但不等于100条查询并行 | 当前瓶颈可能首先是接入层；不能把它表述成Ladybug引擎永远不支持并发读 |
+| 0.19.0默认`enableMultiWrites=false`，事务管理限制写事务；同RW文件受OS锁保护 | 第一个进程已打开星河图，第二个进程不能靠再打开同一文件就增加一个写入者 | 不能通过加Uvicorn worker/Pod实现同图多writer扩容；本报告未验证调试multiwrite选项，不把它作为解决方案 |
+| queue、cache、dataset mutation lock均在Cognee进程内 | 4个API进程各自认为还有槽位，却可能同时争抢星河的同一文件 | 进程内排队不是集群调度；增加进程之前须建立唯一owner路由 |
+| 当前owner与文件生命周期没有集成跨机复制、选主和自动故障切换 | 星河图所在主机宕机，新API进程并不会自动获得一份已同步、可安全接管的图 | 不能把共享目录或HTTP接口当成HA；恢复策略需另做，或换有HA基础的服务型数据库 |
+
+依据：[同步worker](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee_db_workers/harness.py#L419)、[同连接mutex](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/main/client_context.cpp#L369)、[默认单写配置](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/include/main/database.h#L81)、[事务管理](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/transaction/transaction_manager.cpp#L55)、[RW文件锁](https://github.com/LadybugDB/ladybug/blob/c934f673b6b1c5b680bdae3295cbd909b5855cef/src/storage/storage_manager.cpp#L67)、[进程内dataset锁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/locks/dataset_lock.py#L1)。
+
+官方[并发说明](https://docs.ladybugdb.com/concurrency/)也区分两种情况：同一个读写Database对象可以创建多个Connection；多个独立Database对象共同打开同一文件则只能全部只读。因此路线B有同owner多连接的实现基础，但不能用“一个进程写、其他进程只读同文件”冒充在线读副本。该页描述的是引擎使用方式，Cognee当前同步worker仍需改造。
+
+### 9.3 保留Ladybug，路线A：大量独立dataset按owner分片
+
+**适用条件：每个图仍能在单机运行，压力来自图的数量多；不要求把一个图拆到多台机器。**例如100家客户各有自己的项目图，客户甲的查询不需要跨进客户乙的图。可以让机器A负责dataset 1～50、机器B负责51～100；这只是说明分配方式，不是每机50图的容量承诺。
+
+```mermaid
+flowchart LR
+ U[客户端] --> API[多个Cognee API进程]
+ API --> R[鉴权后按dataset查固定owner]
+ R --> A[机器A：负责一批dataset]
+ R --> B[机器B：负责另一批dataset]
+ A --> F1[A持有的独立图文件]
+ B --> F2[B持有的独立图文件]
+```
+
+这是**待开发架构**。当前handler按用户owner/dataset生成独立文件，已有数据边界可复用；缺的是跨机控制与路由。不能只给API增加副本就得到上图。
+
+| 要改什么 | 代码接点与待开发内容 | 必须通过的验收 |
+|---|---|---|
+| dataset到服务owner的映射 | 在关系库登记placement，新增路由服务；接入`dataset_database_handler`、`context_global_variables.py`，返回目标owner而非让每个API自行打开文件 | 同dataset的所有请求到同一owner；不同dataset可分布到不同机器；ACL仍先校验 |
+| 请求与任务调度 | 扩展现有`dataset_queue/queue.py`外围调度，增加跨进程准入、每租户配额、持久任务和重试幂等 | 一家客户批量导入不会耗尽全部请求槽；重试不会重复创建实体/关系 |
+| 写入正确性 | owner内部覆盖完整业务mutation的锁/事务；审计来源、feedback、truth、update读改写 | A/B共同支持一条边，追加A与删除B交错后仍保留A；单owner不自动解决所有异步业务交错 |
+| 引擎资源管理 | 在现有cache/worker生命周期上增加owner级CPU、内存、文件句柄预算和冷热回收监控 | 活跃图增长时资源受控，驱逐/重开不造成句柄泄漏与数据丢失 |
+| owner迁移与重启 | 新增停写→排空→关闭旧句柄→搬迁或恢复→新owner开放的交接协议 | 同一图始终只有一个有效RW owner；旧owner被隔离，不能继续写 |
+
+**能解决：**多个独立图的总容量与总请求量分散到多机；API可以横向部署。
+
+**不能解决：**星河这一个热点共享图仍由一个owner承担；没有获得单图分片、并行多writer或自动HA。若要自动故障迁移，还需数据复制/备份恢复、持久任务、旧owner隔离和RPO/RTO验收。仅给路由记录加租约，无法阻止失联旧owner继续写，也不能保证新机已有最新数据。
+
+### 9.4 保留Ladybug，路线B：一个共享图封装为唯一数据库服务
+
+**适用条件：单图资源仍可由单机承担，写入允许受控排队，主要诉求是多个API进程安全访问同一图，或改善读取调度；接受单owner故障边界。**
+
+例：100人共享星河项目图，4个API进程负责认证、LLM和HTTP响应，但数据库操作统一发给星河owner。它与路线A的区别是：A把不同图分到不同机器；B把同一图的访问集中到一个受控服务。
+
+| 改造层 | 具体工作 | 能解决什么 | 不能据此承诺什么 |
+|---|---|---|---|
+| 远程接入 | 补`RemoteLadybugAdapter`的dataset路由、dataset handler、选库、鉴权、连接/删除生命周期和schema迁移 | 多个API不再各自争抢同一本地文件 | HTTP可达不等于多租户正确，更不等于复制集群 |
+| 读取调度 | 重构当前同步worker请求执行；在唯一Database owner内评估多Connection读池、执行器、并发上限、超时与取消 | 去掉单Connection/同步派发造成的部分排队，允许验证并发读收益 | 不是配置开关；需验证引擎快照/事务规则及读写混合正确性，不能预报加速倍数 |
+| 写入调度 | 同dataset整业务mutation串行或显式事务；operation id、幂等重试、故障后结果对账 | 防止来源与学习状态读改写覆盖，避免超时重试重复写入 | 默认单写事务限制仍在；不会变成跨机器多writer |
+| 服务运维 | 请求限流、任务积压监控、优雅关闭、备份与人工/受控恢复 | 可观测地运行单owner服务 | 不提供数据库原生复制/自动故障切换；自动HA另有工程范围 |
+
+**当前`ladybug-remote`不能直接承担这条路线。**注册表没有它的dataset handler，默认开启backend access control时会失败；关闭权限只是绕过隔离。其构造还调用本地父类初始化，HTTP query缺dataset选库参数，远端schema缺本地来源字段`source_ref_*`，继承的来源方法会遇到schema不匹配。因此必须补完上述协议和数据合同。[remote源码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/remote_ladybug_adapter.py#L36)。
+
+#### 为什么`SHARED_LADYBUG_LOCK`不是扩容方案
+
+这个开关让各进程对同一图**轮流**执行：取跨进程缓存锁→打开库→执行一条query→关闭库→释放锁。它可以协调访问，却增加开关库/扩展/schema成本，仍串行执行。Redis或PG advisory lock可提供该缓存锁；默认SQLite/FS不能提供同样能力。Redis默认租期240秒，续约未在本次验证；PG锁显式解锁或连接死亡后释放，不是按Redis式TTL到期。[query实现](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L661)、[PG锁](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/cache/sql/SqlCacheAdapter.py#L450)。
+
+更要紧的是锁只覆盖一条query，不覆盖整个业务操作。星河的一条边原来由文档B支持：任务甲读取`[B]`，准备追加A写成`[A,B]`；任务乙也读取`[B]`，准备撤回B写成`[]`。即使四条query每次都拿锁，乙最后写入仍会覆盖A。源码`_apply_source_ref_change`分开读写，锁是adapter本地asyncio锁，多进程之间无效。应锁住完整mutation或把它改成正确的事务/原子更新；feedback/truth/update也要同样审计。[来源读改写](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L1392)。
+
+**路线B的终点是“受控的单owner图服务”。如果你的硬要求是同图跨机扩写或自动HA，不把路线B当最终目标，直接进入下面的替代路线。**
+
+### 9.5 不再使用Ladybug：什么时候换、先选谁、具体要补什么
+
+以下是基于固定源码缺口的**验证顺序建议**，不是数据库性能排行榜，也没有候选已通过本项目100并发验收。许可证与逐项方法证据见[第10章](#alternatives)。换图服务时可保留现有PG关系库和PGVector。
+
+| 触发换库的明确条件 | 优先路线及固定版本 | 为什么纳入候选 | Cognee侧必须开发/验证 | 不可省略的限制 |
+|---|---|---|---|---|
+| 同一图由多API/多机访问，要求数据库服务自身复制与故障切换；尚无单图分片硬要求 | **先做ArcadeDB 26.9.1 PoC**（Apache-2.0） | 服务端已有数据库路由、Bolt事务与Raft HA实现，比自行给嵌入式文件补复制/选主更有现成基础 | 升级旧社区插件依赖；补dataset handler/选库、15个来源方法、学习状态、Temporal、正确metrics；做事务与HA故障测试 | 旧插件不是完整替代；HA≠已证明单图容量自动分片；Raft集群也不等于任意多节点独立同时写 |
+| 单图容量或持续写入已不能由单机承担，需要真正评估分布式存储与执行 | **先评HugeGraph 1.7.0，再按一致性/运维约束筛JanusGraph 1.1.0、NebulaGraph 3.8.0**（均为所核验版本的Apache-2.0） | 上游提供服务化/分布式存储组合或相关集群组件，可进入分片方案验证 | 新adapter、dataset handler、UUID/边身份、来源原子性与恢复、图查询/状态映射；明确所选存储/分区部署 | HugeGraph的graphspace有PD部署条件；JanusGraph外部后端事务/锁限制；Nebula集合属性需重建模型。都不能凭名字保证热点写线性扩展 |
+| 首要约束是使用PG运维体系，允许自管PG扩展，单PG主库能力满足目标 | **PG18＋AGE1.8**作为另一适配路线 | 有Cypher图原语和PG事务/运维基础 | 按第8章新增adapter、codec、索引与handler，替代APOC/GDS调用行为 | AGE不是同图分布式引擎的证明；不能保证消除JOIN或比Ladybug快；华为RDS缺AGE扩展时不能只改连接协议 |
+
+ArcadeDB推荐的依据是[数据库路由](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/bolt/src/main/java/com/arcadedb/bolt/BoltNetworkExecutor.java#L778)、[事务入口](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/bolt/src/main/java/com/arcadedb/bolt/BoltNetworkExecutor.java#L1061)和[HA插件](https://github.com/ArcadeData/arcadedb/blob/b6a92623554bb332d7564de19fbd9fdbc2d1d45e/server/src/main/java/com/arcadedb/server/HAServerPlugin.java#L27)，不是已经跑过其HA压测。其社区插件的实际缺口在第10章逐项列出；不建议未经补齐直接用于完整Cognee生产业务。
+
+**不存在本轮已证实的“改一个provider就能获得完整功能、分布式容量与HA”的宽松许可替代。**有可开发的候选，接入完成后必须用同一组来源删除、隔离、反馈、检索和故障用例验收；迁移时保持UUID、来源与学习状态，并核对图向量关联。
+
+### 9.6 单图容量和100用户：用什么测量决定是否走改造路线
+
+先把负载拆成独立图数、活跃图数、单图节点/边规模、每秒读写、查询跳数/扇出和目标P95。注册100用户既不是100并发，也不能证明需要分布式图；100同时recall又可能包含向量、图查询与LLM三段不同的瓶颈。
+
+| 必须测的现象 | 从代码能确认的原因 | 根据结果采取的行动 |
+|---|---|---|
+| 多dataset进入任务的排队时间、冷热打开时间 | 默认queue限额6，按task+dataset管理槽位；同task同dataset可重入，其他task仍占槽。它不是全HTTP入口限流，关闭backend access control时该路径不生效 | 调整准入与资源预算；独立图总量超过单机再走路线A，不能直接把上限改100 |
+| 同dataset图查询排队、执行时间与读写等待 | 默认复用adapter/worker，同步派发；进程内dataset锁也使相关写pipeline等待 | 写入可排队、读是瓶颈时评路线B；硬要求同图跨机扩写则换分布式路线 |
+| 总RSS、CPU、打开文件与重开次数 | buffer_pool/max_db_size默认配置32GiB，线程0取引擎默认；LRU默认6但pinned可超过软上限 | 按总资源配置每DB预算；不能写成6×32GiB必占192GiB RAM，也不能把默认配置当最大可支持图规模 |
+| 同图多API worker错误、idle句柄持有 | 各进程有各自cache/锁；文件未释放时另一RW owner锁冲突 | 用固定owner路由；反复重试和共享目录不能解决稳定多owner |
+| owner或主机故障后的丢失量与恢复时间 | 当前接入没有完整跨机HA | 接受恢复目标则制定备份/受控恢复；不接受则选服务型HA路线 |
+
+空闲TTL600秒是cache回收阈值，周期性reaper、容量驱逐、活跃pin和引用都会影响实际关闭时间，不是硬性保留或关闭时限。以上默认值可由[queue](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/dataset_queue/queue.py#L78)、[上下文](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/context_global_variables.py#L202)、[adapter资源参数](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L70)及`closing_lru_cache.py`核对。任何容量结论还要记录硬件、数据度分布、查询深度和混合负载；当前尚无这类生产基准。
+
+### 9.7 无论规模大小都要处理：已复现的统计正确性缺陷
+
+这些是**Cognee Ladybug adapter查询的缺陷**，应修复或明确标记统计不可用；不是Ladybug无法存节点/边的证据，也不是判定需要分布式的理由。为了不与选型决策混淆，统一放在这里。
+
+adapter.py:3422–3447 把每个节点3跳内邻居列表当组件，缺少完整连通闭包，列表顺序也没有统一归一，孤点因MATCH没有行而消失。教学反例张三—李四—星河—赵六—运维平台是一条5节点链，实际只有1个连通分量，但两端3跳集合不含对端，与中间集合不同，不能保证返回1。只有孤点王五的图实际有1组件；实跑原query返回[[null]]，helper返回None、size列表为空，不是正确的1。影响是监控/可视化组件数和大小误导，并非普通图检索必然失败。应修复为正确WCC，或暂时明确标记统计不可用；若保留三跳邻域统计，必须另定名称与语义，不能冒充连通分量，也不能声称GDS替代已等价。
 
 adapter.py:3449–3458 最短路查询前面枚举n,m，最后却只RETURN MIN(LENGTH(path))，没有按(n,m)分组。返回的是所有候选对路径长度的全局最小值，后面max这个单元素列表并不是直径。张三—李四—星河链真实直径2，存在一跳边使全局min=1，单独这个helper会返回[1]（0.19.0原query实测为[[1]]）；完整optional metrics随后还会遇到聚类异常，最终回退为diameter=-1，不能写成页面最终显示1。普通 recall不用该optional统计；需要直径/平均最短路时应修。无界变长路径枚举还存在工作量放大。
 
 adapter.py:3469–3479 clustering 使用第二个必匹配三角形MATCH，没有三角形的节点被丢弃，不能等价于包含零值节点的全图平均。已在0.19.0实跑四种图，均报Binder exception: Expression avg_clustering contains nested aggregation。外层3349–3420捕获任何异常返回全0节点/边及-1optional，导致“算统计失败”伪装成空图。应拆分基础计数与optional统计失败，返回明确不可用状态，并写反例测试。
 
-### 直接引擎复现实验（已完成，不是性能基准）
+#### 原查询复现实验（已完成，不是性能基准）
 
 隔离venv安装PyPI `ladybug==0.19.0`，Python3.14/Windows；先import cognee_db_workers注册OpenSSL，再直连内存Ladybug。通过AST从当前Cognee源码提取原query，未改写查询。64MiB buffer pool、256MiB max DB size、2线程。复现核心脚本附在本篇末尾；表中列出实际输出。原始完整JSON保存于本轮本地研究记录。没有安装/运行完整Cognee、LLM和端到端API，不外推吞吐。
 
@@ -1008,32 +1118,11 @@ adapter.py:3469–3479 clustering 使用第二个必匹配三角形MATCH，没�
 
 WCC额外原因：无向变长路径可返回起点，COLLECT(DISTINCT m.id)含源点后又拼接[node_id]，列表长度甚至超过总节点数；每节点得到的有序列表还不是规范集合。最短路64MiB失败说明该查询在这个配置上的实际风险，不能说5节点Ladybug普遍不能处理。标准图算法可以修复这些适配器查询；不是Ladybug底层存不下这类图。
 
-### 100用户实例拆解
+### 9.8 改造成本边界与证据索引
 
-**A. 100人各有自己的项目资料。** 张三dataset A、李四dataset B，创建两个不同`.lbug`文件。彼此文件锁不冲突。100人不是同时打开100数据库：默认dataset queue对进入数据上下文的任务限额6，缓存LRU默认6，idle TTL600秒。第7个同时进入的scope会等待（具体其他任务是否占多个槽要看调用链）。队列不是HTTP总入口限流，上传前置处理/LLM等也可能消耗资源。更多注册用户主要增加磁盘与冷热切换；实际瓶颈由活跃dataset数、文档规模、查询扇出、LLM调用决定。
+全Agent开发的已有 **30～60 Agent小时、约1～3自然日**只是单owner验证、统计修复与复核的未校准预算，**不包含路线A的跨机owner调度，也不包含路线B服务化，更不包含复制/自动HA**。路线A/B先各自冻结部署和一致性合同；第11.2节的8～16 Agent小时仅用于选定路线的首轮架构PoC，不是完成整个服务的承诺。PoC至少跑通两API进程访问、来源交错写、重启/迁移，然后以实际执行日志估剩余成本。
 
-**B. 100人共享星河dataset。** 授权用户都绑定同一个owner的同一文件；没有100份图。每个async task各拿槽，同进程同cache key复用一个adapter和数据库子进程。同dataset写pipeline在进程内dataset_lock等待，查询RPC在默认worker同步handler里串行处理（harness.py:419–432,506–537；kuzu_worker.py:147）；单条查询内部可多线程，不等于同时并行100条查询。100同时recall可能先等队列、再等数据库查询、再等LLM；不能凭用户数给响应时间承诺。
-
-**C. 想提高速度把同服务开成4个Uvicorn worker。** 4个进程各自6个槽不等于一个全局6槽；也各有cache/dataset lock。请求1在worker1打开星河文件，worker2再打开同文件RW会触发OS锁；worker1已经返回响应但idle保温600秒仍可持有句柄。重试只用于前一个owner短暂关闭窗口（kuzu_worker.py:38–69），不解决稳定多owner。
-
-**D. 开SHARED_LADYBUG_LOCK。** adapter.py:661–727每次query先取跨进程缓存锁，再open、execute、close，最后放锁，允许轮流访问，代价是同文件查询串行加开关DB/JSON扩展/schema成本。当前cache可用Redis或Postgres advisory lock（SqlCacheAdapter.py:450–483），默认SQLite和FS不行；名称redis_lock只是变量历史名。Redis锁默认240秒租期，长查询与租期续约未在本次验证，不能等同无条件安全；PG锁可显式release/unlock释放，也会在连接死亡时释放，没有Redis式TTL自动过期，仍需网络故障测试。
-
-更核心的是query锁不是完整业务操作锁。A文档追加来源过程读旧source_ref=[B]→本地拼[A,B]→写回；另一worker同时删除B也读旧[B]→拼[]→写回，两个单query虽轮流执行，最后写仍可能覆盖前者。这是源码_apply_source_ref_change:1392–1430读写分两次、只有adapter本地asyncio锁的交错反例。补救应跨进程锁整个dataset mutation/事务、或者同dataset固定单owner，而不能声称开启SHARED_LADYBUG_LOCK就解决全部100用户并发一致性。feedback/truth/update JSON读改写（2342–2626）也要检查同样交错。
-
-### 缓存、资源和远程模式边界
-
-- LRU是软容量：closing_lru_cache.py:21–22、484–488、732–748跳过pinned的活跃引擎，全部pinned可临时超过maxsize。600秒是空闲回收阈值，reaper按周期检查；容量回收可提前、活跃pin或持有引用可延后，非硬时限。同dataset同配置在同进程共享cache，不是一task一子进程；不同配置key可能再生成引擎，配置必须稳定。
-- adapter.py:70–71实际buffer_pool/max_db_size默认32GiB，旧docstring提到4GiB已过期。不能写6×32GiB就是192GiB常驻RAM；这是配置上限/资源约束，实际RSS需测。kuzu_num_threads=0取引擎默认，多个活跃DB各抢CPU；应按总CPU/RAM预算设每DB线程和buffer，不能盲目把queue改成100。
-- 缓存/queue是进程内，不提供跨主机leader、复制或自动故障切换。多个Pod挂共享目录不是天然分布式图数据库；只读副本与写入一致性也不能由文件共享解决。
-- RemoteLadybugAdapter不是现成多租户集群方案：supported_dataset_database_handlers没有ladybug-remote，默认ENABLE_BACKEND_ACCESS_CONTROL=true会因handler/provider不匹配失败；关闭access control变成共享库不能当100租户隔离方案。remote_ladybug_adapter.py:36还调用本地父构造(dummy path)，query请求无dataset选库参数，远端创建schema:155–201缺本地source_ref_*列；继承的source provenance方法访问这些列会失配。因此应补handler、dataset路由、schema迁移、生命周期、鉴权/限流/错误契约后再谈远程化。只是HTTP可达不代表完整支持。
-
-### 9.2 如何部署与演进
-
-起步验证拓扑：100客户端→一个Cognee API主进程→每个活跃dataset独立Ladybug子进程owner，本地持久盘；关系元数据与向量可选PG/pgvector，保留access control与dataset queue。可让API前接反向代理，但不能随便增加共享同目录的RW worker。该拓扑不需从零开发graph adapter，先做容量/故障验收；可用性仍是单owner/单机边界，不是生产SLA保证。
-
-若需要水平扩容：按dataset稳定路由到owner worker，文件只归该owner，入口层统一认证与权限验证；跨owner的请求通过服务接口转发。迁移owner必须先停写/排空/关闭旧句柄，再交接恢复；自动lease、fencing、备份与故障转移是新增工程，不是原生已有。若核心要求同一个大共享dataset高并发、跨机器高可用，应评估服务型图数据库，避免把嵌入式数据库硬包装成集群。
-
-### 9.3 本节固定源码接点
+本章由Ladybug审计与候选数据库审计两个子Agent复核场景结论，主Agent重组；本轮重写没有新实施适配代码、没有新增100用户压测。固定源码入口如下：
 
 - [Cognee版本依赖](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/pyproject.toml#L74)
 - [Node/EDGE schema与query](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/ladybug/adapter.py#L391)
@@ -1256,7 +1345,7 @@ O1→O2有依赖，O3可以另一路执行；基准资源释放后，含评审�
 |L2 统计正确性修复|修WCC/shortest/clustering、拆开错误返回、孤点/链/环/多组件fixture与复核|12–24|先限定精确小图/可选大图统计预算，不能默认全图APSP无限制|
 |L3 基础独立复核/整合|独立Agent审计、错误注入复测、部署文档|6–12|不重复L1正常测试|
 |L1+L2+L3|可并行L1/L2后汇合|30–60|最多4Agents，约1–3自然日资源预算，须首轮实跑后重估|
-|L4 多owner服务化/故障迁移|dataset路由、跨进程整操作锁或所有权、remote schema/handler、超时幂等、恢复|暂不报可靠总量|必须先确定HA/SLA/共享存储/单共享图还是100隔离图；先用8–16Agent小时架构PoC确定剩余范围|
+|L4 选定路线的架构PoC|路线A：独立dataset跨机owner路由；或路线B：单图唯一owner服务、remote合同/读调度/整操作一致性；参见9.3/9.4|8–16，仅首轮PoC预算|冻结所选路线，跑两API访问、来源交错、重启/迁移，再估实现与验证总量；不包含复制/自动HA|
 
 不能把Ladybug无新adapter解读成零成本，也不能以本次小图实验宣称100用户压测已通过。Token成本缺实际模型与使用日志不造数字。
 
@@ -1270,11 +1359,11 @@ ArcadeDB虽已有CRUD，缺口仍横跨版本依赖、handler、来源15接口�
 <a id="acceptance"></a>
 ## 12. 可执行的选型与验收顺序
 
-**若目标是先让100名用户使用各自或少量共享数据集：优先验证Ladybug单owner方案，修复已复现的统计问题，保留权限和队列，再测真实负载。**这个优先级来自已有47方法与明确锁模型，不是宣称Ladybug性能胜过AGE。
+**独立dataset多：保留Ladybug，单机先验收；总量增长后按第9.3节做dataset到owner的跨机分片。单个共享图但接受单owner：先测实际负载，必要时按第9.4节服务化与改造读调度。**两条路线均不自动获得同图多writer扩展或数据库HA，不能以100注册用户作为换库依据。
 
 **若要求PG运维体系且能安装扩展：并行评估PG18＋AGE1.8的身份、来源、邻域PoC。**如果只是希望消除JOIN，不足以成为选AGE的理由。若标准华为RDS不能安装AGE且不能新增图服务，此路线在部署上即不成立。
 
-**若必须多API进程/多主机访问同一共享大图，或要求数据库服务自身高可用：优先把ArcadeDB、HugeGraph加入同合同PoC，再按实测选。**它们解除本地文件owner限制的方式更直接，但尚未完成Cognee全合同适配。只有确实需要分布式规模且接受额外一致性与运维范围时，再深入JanusGraph/NebulaGraph。
+**同一图要求数据库服务自身HA：优先验证ArcadeDB 26.9.1，先补齐插件合同；同一图明确要求超单机容量或分布式扩写：评估HugeGraph 1.7.0及JanusGraph/NebulaGraph。**这是按架构需求确定验证顺序，尚非生产性能结论。ArcadeDB的HA不能当成已证明单图自动分片；仅多API访问而无HA要求，也可以采用Ladybug单owner服务，无须据此强制换库。
 
 ### 12.1 所有后端使用同一套“业务正确性”用例
 
