@@ -5,6 +5,7 @@
 - [竞品全景与 ContextDB 架构（最新）](docs/competitive-landscape/README.md)
 - [Cognee 与 Hindsight：当前架构、代码实现及演进对比](docs/competitive-landscape/05-code-architecture-cognee-vs-hindsight.md)
 - [Cognee 分析目录](docs/cognee/README.md)
+- [初学者图解：两份文档怎样用到3种APOC、7种GDS，AGE怎么替代](docs/cognee/apache-age-apoc-gds-walkthrough.md)
 - [Cognee 图存储与 PostgreSQL 替换分析](docs/cognee/graph-storage-postgres-analysis.md)
 - [Cognee PG 图能力：数据模型、改造位置与工作量](docs/cognee/postgres-graph-implementation-plan.md)
 - [Cognee × AGE：版本缺口、PG/华为云条件、逐项改造与工时（最新）](docs/cognee/apache-age-compatibility-matrix.md)

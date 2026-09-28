@@ -2,6 +2,7 @@
 
 本轮基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`；Hindsight `12f2d54f643baddacb98cd547c89b1a50c5c3dcc`。
 
+- [初学者先读：用两份项目文档拆解APOC、GDS与AGE替代](apache-age-apoc-gds-walkthrough.md)：从张三重复入图、集合合并和关系写入，到计算副本、连通分量、最短距离和聚类系数，逐个解释3种APOC与7种GDS；包含图示和输入/输出。
 - [Apache AGE 兼容矩阵与逐项改造（最新）](apache-age-compatibility-matrix.md)：按 AGE＋PG 发布包列明功能与缺口；详解UUID/业务边唯一性、3种APOC和7种GDS调用缺失后的具体后果、替代成本与工时归属；盘点47个图接口，区分32～53人日的基础范围和选配工作。
 - [图存储、模块数据流与 PostgreSQL 替换分析](graph-storage-postgres-analysis.md)：图的模块用途、节点与关系模型、向量和图的交互、PG 适配机制、功能边界及华为云 RDS 兼容条件。
 - [PG 图能力的具体实现、改造清单与工作量](postgres-graph-implementation-plan.md)：节点/边/来源如何落表，反馈、truth、局部更新和时间检索的接口契约，生产化问题、华为云落地与分档人日估算。

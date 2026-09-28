@@ -1,5 +1,7 @@
 # Cognee × Apache AGE：版本缺口、PG 与华为云条件、逐项改造和工作量
 
+初次接触图数据库，先读[两份项目文档的逐步拆解：3种APOC、7种GDS各处理什么数据](apache-age-apoc-gds-walkthrough.md)。它用同一张图说明输入、结果、失败影响和AGE替代，再回到本文核对版本和工作量。
+
 核验日期：2026-09-28。Cognee 固定提交 `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`。本文替代上一份可行性报告中的笼统兼容判断；[此前执行机制分析](apache-age-feasibility-analysis.md)保留作性能背景。
 
 **先回答“哪个 AGE 版本完全支持 Cognee”：本轮核验的版本中，没有一个能据现有代码宣布完全支持。**当前 Cognee 没有 AGE adapter；AGE 1.8 也不提供 Neo4j 的 APOC/GDS 兼容库。可以确认的是：1.6、1.7、1.8 已有不同程度的数据库基础能力，可以据此开发适配器。是否完成 Cognee 兼容，要按下面逐项业务合同验收，不能由“AGE 支持 Cypher”推出。[Cognee 工厂][C1]、[公共接口][C2]、[官方图后端文档](https://docs.cognee.ai/setup-configuration/graph-stores)。
