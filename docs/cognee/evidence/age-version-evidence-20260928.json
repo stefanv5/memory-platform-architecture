@@ -1,0 +1,122 @@
+{
+    "captured_at_utc":  "2026-09-28T03:52:15.292260+00:00",
+    "pages":  [
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"1.1.0/\"\u003e1.1.0/\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"KEYS\"\u003eKEYS\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"PG11/\"\u003ePG11/\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"PG12/\"\u003ePG12/\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"PG13/\"\u003ePG13/\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"PG14/\"\u003ePG14/\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"PG15/\"\u003ePG15/\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"PG16/\"\u003ePG16/\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"PG17/\"\u003ePG17/\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"PG18/\"\u003ePG18/\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"age-viewer/\"\u003eage-viewer/\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  },
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/PG14/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age/PG14\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age/PG14\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"1.6.0/\"\u003e1.6.0/\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  },
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/PG14/1.6.0/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age/PG14/1.6.0\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age/PG14/1.6.0\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.6.0-src.tar.gz\"\u003eapache-age-1.6.0-src.tar.gz\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.6.0-src.tar.gz.asc\"\u003eapache-age-1.6.0-src.tar.gz.asc\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.6.0-src.tar.gz.sha512\"\u003eapache-age-1.6.0-src.tar.gz.sha512\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  },
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/PG15/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age/PG15\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age/PG15\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"1.6.0/\"\u003e1.6.0/\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  },
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/PG15/1.6.0/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age/PG15/1.6.0\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age/PG15/1.6.0\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.6.0-src.tar.gz\"\u003eapache-age-1.6.0-src.tar.gz\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.6.0-src.tar.gz.asc\"\u003eapache-age-1.6.0-src.tar.gz.asc\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.6.0-src.tar.gz.sha512\"\u003eapache-age-1.6.0-src.tar.gz.sha512\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  },
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/PG16/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age/PG16\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age/PG16\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"1.6.0/\"\u003e1.6.0/\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  },
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/PG16/1.6.0/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age/PG16/1.6.0\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age/PG16/1.6.0\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.6.0-src.tar.gz\"\u003eapache-age-1.6.0-src.tar.gz\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.6.0-src.tar.gz.asc\"\u003eapache-age-1.6.0-src.tar.gz.asc\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.6.0-src.tar.gz.sha512\"\u003eapache-age-1.6.0-src.tar.gz.sha512\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  },
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/PG17/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age/PG17\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age/PG17\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"1.7.0/\"\u003e1.7.0/\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  },
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/PG17/1.7.0/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age/PG17/1.7.0\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age/PG17/1.7.0\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.7.0-src.tar.gz\"\u003eapache-age-1.7.0-src.tar.gz\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.7.0-src.tar.gz.asc\"\u003eapache-age-1.7.0-src.tar.gz.asc\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.7.0-src.tar.gz.sha512\"\u003eapache-age-1.7.0-src.tar.gz.sha512\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  },
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/PG18/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age/PG18\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age/PG18\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"1.8.0/\"\u003e1.8.0/\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  },
+                  {
+                      "url":  "https://dist.apache.org/repos/dist/release/age/PG18/1.8.0/",
+                      "http_status":  200,
+                      "body":  "\u003chtml\u003e\u003chead\u003e\u003ctitle\u003edist - Revision 88021: /release/age/PG18/1.8.0\u003c/title\u003e\u003c/head\u003e\n\u003cbody\u003e\n \u003ch2\u003edist - Revision 88021: /release/age/PG18/1.8.0\u003c/h2\u003e\n \u003cul\u003e\n  \u003cli\u003e\u003ca href=\"../\"\u003e..\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.8.0-src.tar.gz\"\u003eapache-age-1.8.0-src.tar.gz\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.8.0-src.tar.gz.asc\"\u003eapache-age-1.8.0-src.tar.gz.asc\u003c/a\u003e\u003c/li\u003e\n  \u003cli\u003e\u003ca href=\"apache-age-1.8.0-src.tar.gz.sha512\"\u003eapache-age-1.8.0-src.tar.gz.sha512\u003c/a\u003e\u003c/li\u003e\n \u003c/ul\u003e\n\u003c/body\u003e\u003c/html\u003e"
+                  }
+              ],
+    "github_api":  {
+                       "url":  "https://api.github.com/repos/apache/age/releases?per_page=100",
+                       "releases":  [
+                                        {
+                                            "tag_name":  "PG15/v1.8.0-rc0",
+                                            "name":  "Release v1.8.0 for PG15",
+                                            "published_at":  "2026-09-19T16:02:16Z",
+                                            "prerelease":  true,
+                                            "html_url":  "https://github.com/apache/age/releases/tag/PG15/v1.8.0-rc0"
+                                        },
+                                        {
+                                            "tag_name":  "PG18/v1.8.0-rc0",
+                                            "name":  "Release v1.8.0 for PG18",
+                                            "published_at":  "2026-07-09T00:21:23Z",
+                                            "prerelease":  false,
+                                            "html_url":  "https://github.com/apache/age/releases/tag/PG18/v1.8.0-rc0"
+                                        },
+                                        {
+                                            "tag_name":  "PG17/v1.7.0-rc0",
+                                            "name":  "Release v1.7.0 for PG17",
+                                            "published_at":  "2026-02-11T17:08:27Z",
+                                            "prerelease":  false,
+                                            "html_url":  "https://github.com/apache/age/releases/tag/PG17/v1.7.0-rc0"
+                                        },
+                                        {
+                                            "tag_name":  "PG18/v1.7.0-rc0",
+                                            "name":  "Release v1.7.0 for PG18",
+                                            "published_at":  "2026-01-21T20:26:32Z",
+                                            "prerelease":  false,
+                                            "html_url":  "https://github.com/apache/age/releases/tag/PG18/v1.7.0-rc0"
+                                        },
+                                        {
+                                            "tag_name":  "PG15/v1.6.0-rc0",
+                                            "name":  "Release v1.6.0 for PG15",
+                                            "published_at":  "2025-11-20T18:41:38Z",
+                                            "prerelease":  false,
+                                            "html_url":  "https://github.com/apache/age/releases/tag/PG15/v1.6.0-rc0"
+                                        },
+                                        {
+                                            "tag_name":  "PG14/v1.6.0-rc0",
+                                            "name":  "Release v1.6.0 for PG14",
+                                            "published_at":  "2025-11-20T18:44:58Z",
+                                            "prerelease":  false,
+                                            "html_url":  "https://github.com/apache/age/releases/tag/PG14/v1.6.0-rc0"
+                                        },
+                                        {
+                                            "tag_name":  "PG17/v1.6.0-rc0",
+                                            "name":  "Release v1.6.0 for PG17",
+                                            "published_at":  "2025-09-22T19:16:21Z",
+                                            "prerelease":  false,
+                                            "html_url":  "https://github.com/apache/age/releases/tag/PG17/v1.6.0-rc0"
+                                        },
+                                        {
+                                            "tag_name":  "PG16/v1.6.0-rc0",
+                                            "name":  "Release v1.6.0 for PG16",
+                                            "published_at":  "2025-09-04T16:45:06Z",
+                                            "prerelease":  false,
+                                            "html_url":  "https://github.com/apache/age/releases/tag/PG16/v1.6.0-rc0"
+                                        }
+                                    ]
+                   },
+    "note":  "Apache directory listings and GitHub release metadata captured for version verification. Release bodies omitted; use html_url for full notes. This snapshot does not prove runtime compatibility or performance."
+}

@@ -1,5 +1,7 @@
 # Cognee 图能力落到 PostgreSQL：数据模型、改造位置与工作量
 
+2026-09-28 补充：[Apache AGE 专题](apache-age-feasibility-analysis.md)进一步核验专用图扩展路线，包含正式版本、固定跳/VLE 的真实执行机制、Cognee 接入与华为云 RDS 安装边界。本文讨论的普通 PG 数据表达能力，不构成其性能优于图扩展的结论。
+
 分析日期：2026-09-24。源码基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`。本文承接[图存储与 PG 替换分析](graph-storage-postgres-analysis.md)，聚焦开源 PG adapter 的补齐与工程化；[Cognee / Hindsight 架构对比](../competitive-landscape/05-code-architecture-cognee-vs-hindsight.md)另见专题。
 
 本文区分“当前代码已经实现”“建议改造”“需要运行验证”。本轮只做源码和官方资料分析，没有修改 Cognee 源码，没有连接华为云实例，也没有执行性能测试。下文 SQL 是说明实现思路的示意，不能直接替代带事务、权限、校验及错误处理的 adapter 实现。
