@@ -12,14 +12,15 @@
 | 问题 | 能够据证据作出的结论 |
 |---|---|
 | 纯 PG 必须再装图数据库才能存 Cognee 图吗？ | 不必须。已有 demo adapter 用普通节点/边表实现部分图合同；但它的缺失接口与性能边界客观存在，不能作为完整生产替换承诺。 |
-| 哪个 AGE 版本开箱即用支持整个 Cognee？ | 本次核查的版本中没有。Cognee 没有 AGE adapter；1.8 也没有 APOC/GDS 兼容库。 |
+| 哪个 AGE 版本开箱即用支持整个 Cognee？ | 本次核查的版本中没有，首先缺少Cognee AGE adapter。没有APOC/GDS同名库并非所有功能同等受阻：写入行为必须替代，GDS统计按场景分期，详见第6章。 |
+| APOC和GDS缺失是同一优先级吗？ | **不是。**APOC三项对应正常入图的必需行为；GDS七项在统计路径。摘要准确计数、WCC结构分析、可选全图路径/聚类分别验收，普通Claude Code会话不因缺GDS本身失败。 |
 | AGE 是否值得二次开发？ | 固定 PG18＋AGE1.8 有核心原语支持，适配方案可进入验证；它不是保证消除 JOIN 或保证提速的方案。主要开发发生在 Cognee 适配层，未发现本范围必须改 AGE 内核的证据。 |
 | 华为云 RDS 能直接用 AGE 吗？ | 已公开提供相应 PG 主版本，插件清单未列 AGE。客户端适配不能补出服务器缺少的扩展。可另部署图服务，或用 ECS/容器自管 PG＋AGE。 |
 | 不用 AGE，可以用 Ladybug 吗？ | **能承担已有图业务；不能直接满足同图跨机多writer/自动HA。** 独立dataset可保留并按owner分片；单热点图要求分布式或HA时进入服务型替代选型。具体决策、两条改造路线与替代方案分列于第9章。 |
 | 100 用户能否共用一个 Cognee？ | 用户数量本身不构成禁止条件。关键是共享还是私有 dataset、同时读写量、进程/文件归属和资源预算；没有“100用户必失败”或“已经支持100并发”的实测结论。 |
 | 是否存在友好非 GPL 候选？ | 有，后文固定版本核查 MIT/Apache-2.0 的 Ladybug、AGE、ArcadeDB、HugeGraph、JanusGraph、NebulaGraph；许可证通过不代表 Cognee 合同或多租户自动通过。 |
 
-可直接定位：[当前架构](#architecture) · [普通PG缺口](#plain-pg) · [AGE版本与华为云](#age-versions) · [每项缺口的业务后果](#age-gaps) · [APOC/GDS十项例子](#apoc-gds) · [AGE执行机制](#age-performance) · [适配方案](#age-adapter) · [Ladybug与100用户](#ladybug) · [其他开源选项](#alternatives) · [全Agent成本](#agent-cost) · [验收与决策](#acceptance)。
+可直接定位：[当前架构](#architecture) · [普通PG缺口](#plain-pg) · [AGE版本与华为云](#age-versions) · [每项缺口的业务后果](#age-gaps) · [APOC/GDS十项例子](#apoc-gds) · [缺失影响与优先级](#dependency-impact) · [GDS触发条件](#gds-triggers) · [AGE执行机制](#age-performance) · [适配方案](#age-adapter) · [Ladybug与100用户](#ladybug) · [其他开源选项](#alternatives) · [全Agent成本](#agent-cost) · [验收与决策](#acceptance)。
 
 <a id="architecture"></a>
 ## 2. 先看 Cognee 当前架构：图不是一个独立的“文档依赖模块”
@@ -367,7 +368,8 @@ AGE 的 Makefile 使用 `PG_CONFIG`/PGXS 编译服务端 C 扩展；不是客户
 | **内置 age_shortest_path / age_all_shortest_paths** | **未提供** | **未提供** | **未提供** | **有，标准路线为无权最短路** | 旧版缺专用 API，但不等于不能自行计算最短路；普通邻域不需要它 |
 | **Cypher RETURN shortest_path(a,b)** | **未提供该内置入口** | 同左 | 同左 | **有** | 1.8 不仅能从外层 SQL 调最短路，也有 AGE Cypher 函数入口 |
 | **Neo4j shortestPath((a)-[*]->(b)) 原语法** | 不提供相应模式产生式/内置兼容 | 同左 | 同左 | **仍不等价支持** | 必须改写 Neo4j 查询/prompt，不能仅替换连接串 |
-| **APOC / GDS 原有过程库** | **不提供** | **不提供** | **不提供** | **不提供** | 原样APOC查询会阻断普通入图；原GDS统计会失败，摘要可能降级0/None。必须替代的具体功能与选配边界见第6节 |
+| **APOC三项对应写入行为** | **无同名库** | **无同名库** | **无同名库** | **无同名库** | 原样节点/批量边查询会失败，正常入图前必须在adapter实现集合合并、类型映射、关系写入；不是要求开发APOC库 |
+| **GDS七项统计调用** | **无同名库** | **无同名库** | **无同名库** | **无同名库** | 不阻断常规会话本身；原统计路径会失败。摘要可能回退0，WCC不可用，optional路径/聚类缺失。分别按启用场景处理，见第6章 |
 | 普通 Cypher RLS 检查 | 缺少本轮确认的新版显式 INSERT RLS 检查路径 | 同左 | 已有 policy/WITH CHECK 及角色测试 | 已有对应实现/测试 | 1.6 不能按 PG 原生能力推定安全；1.7/1.8 全 VLE/cache 路径仍未完成本轮安全证明 |
 
 上述表覆盖本任务所需能力与相关方言缺口，不是全部 openCypher conformance 清单。[1.6 四个分支逐项源码证据](evidence/age16-source-matrix.md)、[1.7/1.8 及 PG18 分支证据](evidence/age17-age18-source-matrix.md)保存了读取范围、expected 对照和未验证边界。
@@ -508,6 +510,25 @@ Neo4j写张三时先合并公共__Node__身份，再追加Entity标签。AGE1.8�
 
 APOC是Neo4j的扩展函数/过程库，GDS是其图分析库。这里没有要求AGE复刻整套库，而是逐项替代Cognee实际使用的业务行为。以下业务数据是教学例子，执行位置来自代码；示例抽图不冒充LLM实际输出。
 
+<a id="dependency-impact"></a>
+### 先按用户后果决定优先级：写入、摘要、结构分析分开验收
+
+**APOC三项行为参与正常图写入，迁移时必须有等价实现；本章七种GDS调用集中在图统计路径，不能与写入阻断归为同一优先级。**“不能直接支持整个Cognee”也不等于“普通会话必须装GDS才能工作”。
+
+这里的“不支持”要分清：**保留原Neo4j查询但目标没有对应过程**会报错；**新adapter不用这些过程、却实现了同样的业务结果**，属于另一种实现，不应判成功能缺失。Ladybug已有独立写入实现；AGE需要开发自己的adapter，而不是安装Neo4j的APOC/GDS。
+
+| 验收时点与优先级 | 必须解决的行为 | 不解决的实际影响 | 能否推迟 |
+|---|---|---|---|
+| **正常入图上线前必需** | APOC对应的分组并集、模型类型、动态关系匹配/创建；连同身份与并发规则一起验收 | 保留原调用会使节点/批量边写入失败；直接删调用可能变成能运行但丢分组、类型或关系 | **不能在宣称正常入图可用时推迟**；可改用其他实现，不必保留APOC名称 |
+| **启用图摘要前必需** | 准确节点/边计数、统计异常与真实空图区分；解除计数对重型统计的耦合 | 现摘要入口在GDS统计异常时返回0节点/0边，不缓存成功值，下次可能继续失败；用户会误以为记忆库为空 | 纯会话应用可以暂不接摘要入口；若已展示计数，不能用假0掩盖缺失 |
+| **启用连通性分析前必需** | WCC：连通分量数量及大小 | 无法判断图分成几个互不连通的知识团体、每团多大；这些指标失效，不等于普通关系检索失效 | 可晚于会话功能；需关闭该分析或修改返回/消费合同明确不可用。当前`include_optional=False`仍算WCC，不能仅靠此开关跳过 |
+| **业务需要时选配** | 全图最短路径统计、平均聚类系数 | 无法提供直径/平均最短距离/邻居连接紧密程度；现代码只在`include_optional=True`时调用 | 可以单独排期和压测；普通Claude Code记忆功能不以此为上线门槛 |
+
+**为什么“APOC必须改”不是“必须开发APOC库”？**必须交付的是写入后的正确数据：张三仍保留两个内容分组、文档和实体仍可按类型找到、“参与”和“维护”关系仍准确存在。换数据库后，这些行为可以用原生查询、类型字段或受事务保护的集合操作实现。缺GDS时，普通问答所需节点/关系已经存在；缺这些写入行为时，新知识本身就没有正确进入图。这是两类缺口优先级不同的原因。
+
+本章的GDS结论针对固定源码的七种调用和常规内置链路；显式raw Cypher、自定义Task或外部插件主动执行`gds.*`，需按自己的调用链另行验收。来源追踪、反馈、truth等图接口也是独立合同，不能因为不依赖GDS就省略。
+
+
 
 ### 先把文档摆出来：哪些数据真的交给了数据库？
 
@@ -621,13 +642,52 @@ Cognee 会存储多种对象。下表中的“标签”是数据库节点的分�
 
 若不替代这个过程，边写入会失败；此前写入的节点和节点向量可能已存在，因此会留下需要回滚/补偿的中间状态。关系越多、类型越多，分组批次和索引查找成本越需要验证。基础改造计入 W2/W3。
 
-到这里，三种 APOC 的分工就能对应到具体数据：**列表归属合并、节点类型标签、动态类型的批量关系写入。**在当前 Neo4j adapter 中，节点批量写入都会经过前两种调用，边批量写入经过第三种；不是只有某种特殊文档才需要它们。
+### APOC不改、只删、正确替代：三种后果不能混写
 
-### 图已经写好，什么场景才会调用 GDS？
+| 调用与所在写入步骤 | 保留原调用、不做适配 | 只删调用或草率替代 | 必须证明的正确结果 |
+|---|---|---|---|
+| `apoc.coll.toSet`：`add_node/add_nodes` | 目标不识别函数，节点写入语句失败；即使本次分组为空，原查询仍无条件引用它 | 直接覆盖会把张三的`[项目启动]`变成`[运维交接]`；只拼接不去重会积累重复分组；只对本批去重没有合并库内旧值 | A/B分组均保留，重复写不重复，并发更新不覆盖。它去重分组数组，不负责实体消歧，也不是来源账本 |
+| `apoc.create.addLabels`：同一节点写入语句 | 目标不识别过程，节点写入不能正常完成 | 删调用却保留按`Entity/TextDocument`标签筛选的读代码，按UUID可能查到节点、按模型类型却漏查；文档子图等相关路径结果不完整 | 新类型存储与全部内置类型筛选一起映射；若保留多标签语义，不能只留最后一个type值 |
+| `apoc.merge.relationship`：非空批量`add_edges` | 节点成功后，批量边查询仍失败，无法完成本批关系写入 | 跳过边写入会留下节点但缺关系上下文；改成无条件CREATE会在重试时重复；忽略关系类型会混淆“参与”和“维护” | 同端点同业务关系重复写保持幂等，不同方向/类型保留，属性更新正确，并发唯一性经验证 |
 
-现在用户打开图摘要页面，或者程序请求更完整的图统计。问题变成了：“有多少节点？它们是否连成一片？两个节点平均隔几步？邻居之间紧不紧密？”
+依据：节点语句[328行](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L328)、[批量384行](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L384)、[批量关系1241行](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L1241)。上述“只删”后果是根据代码构造的失败情景，并非本轮已运行的AGE实验。
 
-当前 Neo4j adapter 用 `get_graph_metrics(include_optional=False)` 返回基础统计；传 `True` 时再计算额外指标。图摘要计数在缓存未命中时也会调用这个方法。**触发 GDS 的是统计调用路径，不是文档里出现了某个特殊词，也不是每次普通问答必跑这些算法。**[统计入口](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2333)、[摘要计数调用](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L83)。
+**失败会怎样传到用户？**Neo4j的`query()`记录数据库异常后重抛，存储task不会把缺过程当作可选功能跳过；pipeline会走失败记录与回滚/补偿路径。因此用户可能先收到后台任务已启动，再看到cognify运行失败；不能把启动成功当成资料已完整入图。[异常重抛](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L245)、[pipeline错误与补偿](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/pipelines/operations/run_tasks.py#L292)。
+
+**也不能说失败时整个系统自动回到导入前。**存储顺序是图节点→节点向量→图边→边向量，分阶段执行。若节点两项已替代而边过程未替代，节点与节点向量可能已经写入。现有rollback是应用补偿，补偿自身也可能失败；它不是图、向量、关系库的一次原子事务。普通检索仍可能找到旧数据或部分向量内容，但缺少本次完整关系，不能据“还可以回答”判定导入成功。[写入顺序](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/add_data_points.py#L332)。
+
+边界也要保留：单条`add_edge`已有不依赖APOC的MERGE实现；普通删除节点/边语句也不使用这三项APOC。因此本结论是“当前正常批量入图必须替代这些写入行为”，不是“没有APOC则全部读写删除一律失效”。[单边路径](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L1125)、[删除节点](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L575)。
+
+<a id="gds-triggers"></a>
+### 图已经写好，什么场景才会调用GDS：按实际入口追踪
+
+**本章七种GDS调用集中在Neo4j图统计路径；不是每个session请求、每轮recall或每次improve的固定步骤。**GDS计算的是当前图的结构指标，而普通问答通常只读取候选节点附近的关系。
+
+例如问“张三参与哪个项目”，读到`张三→参与→星河`即可组织答案；客户端显式请求“整个知识库有几个互不连通的团体”的结构统计时，才进入这里讨论的WCC路径；不是聊天文本出现这个问题就自动触发GDS。同一个图的关系检索和全图结构分析，可以独立实现、独立失败。
+
+| 实际入口 | 进入GDS的条件 | 不支持GDS时的影响边界 |
+|---|---|---|
+| 常规session读取、默认HYBRID/GRAPH_COMPLETION检索 | 正常内置链路没有调用这七个过程 | 不因缺GDS本身失去问答；仍要求图读、身份、类型和关系实现正确 |
+| 正常remember/cognify入图、session-aware improve | 正常内置链路没有附带该图统计调用 | 缺GDS本身不阻断这些流程；APOC对应写入行为及来源/学习接口的缺失会产生另一类影响 |
+| `GET /api/v1/datasets/graph-summary`、`GET /api/v1/visualize/brains-summary` | 客户端主动请求；dataset有对应cognify运行记录且计数缓存未命中；使用Neo4j后端 | 调`get_graph_metrics(False)`失败后，该dataset返回0节点/0边、`computed_at=None`，不缓存成功结果；后续摘要请求可能重试 |
+| 显式`get_graph_metrics(False)` | 直接进入Neo4j基础统计 | 不仅WCC不可得，整个方法也可能异常返回不了计数字典；当前没有逐指标失败隔离 |
+| 显式`get_graph_metrics(True)` | 基础统计后再进入可选算法 | 除基础指标外还依赖全点对距离/聚类；缺相应过程会使该次完整统计失败 |
+| `get_pipeline_run_metrics(...)` | 调用者显式使用，完整metrics缓存未命中；参数由调用方决定 | 统计计算异常，不等于原始cognify任务自动失败；本轮未找到默认session/API自动调用此函数的生产调用点 |
+| 自定义raw Cypher/Task | 自定义代码显式调用`gds.*` | 按该自定义功能处理；不能套用“常规问答不依赖”的结论 |
+
+依据：[默认HYBRID邻域读取](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/hybrid/entities.py#L60)、[摘要缓存判断](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L170)、[摘要计算/回退](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L83)、[完整metrics缓存](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/metrics/operations/get_pipeline_run_metrics.py#L59)。缓存正常命中后不重算；并发缓存miss仍可能重复计算，不能称严格每run只执行一次。
+
+**`include_optional=False`不等于禁用GDS。**当前Neo4j顺序是取图数据→检查/删除旧内存投影→新建投影→WCC；只有全点对最短路径和聚类在`True`时额外执行。因此“我只要节点数，把optional关了”仍不能避开GDS。[完整调用顺序](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2333)。
+
+#### Claude Code实例：自动记忆采集与GDS统计不是同一件事
+
+此补充固定外部`cognee-integrations`提交`4d57a36859111b927f08a0b99fe04ccfbc4ed22e`，Claude Code插件`cognee-memory 1.6.1`；不能仅从主仓的MCP说明推断插件行为。
+
+只配置MCP是提供工具，须实际调用`remember`才写入。安装并启用记忆插件后，在capture开启且后端可用时（默认开启，仍有筛选/脱敏），hooks会自动采集：提交问题时暂存本地pending prompt并检索记忆；指定工具执行后记录TraceEntry；Stop时把问题和回答配成QAEntry。typed entry经`/remember/entry`写入session存储，不直接落入SDK字符串输入的add+cognify路径。插件随后按条件显式调用`/improve`进行session到图的持久化/提炼。[hooks](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/hooks/hooks.json#L15)、[typed提前返回](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/api/v1/remember/remember.py#L1068)。
+
+插件默认每10秒检查空闲、空闲60秒后尝试同步；每150个存储工具/Stop事件也可触发检查，非150轮聊天。自动/空闲共用1800秒冷却和新增记录检查，SessionEnd另有最终同步。因此确有自动写入/处理成本，但不是每轮GDS统计，也不是每分钟无条件重导整份聊天。[空闲阈值](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/idle-watcher.py#L41)、[次数触发](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/_plugin_common.py#L1767)、[冷却](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/_plugin_common.py#L1822)、[真正improve请求](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/_plugin_common.py#L5085)。
+
+**当前客户端没有默认额外请求图统计摘要。**所查Claude插件无`graph-summary/brains-summary/get_graph_metrics`调用；状态栏2秒刷新仅重跑本地renderer，显示的memory hits是本次检索结果。当前Cognee前端虽保留`getDatasetGraphSummary`封装，但未找到调用方；MCP旧的空recall→graph-summary探测已移除，测试明确禁止。这里“请求统计摘要”应理解为另行接入该API的管理页/脚本等条件场景，不能写成现成客户端每轮自动执行。[本地renderer](https://github.com/topoteretes/cognee-integrations/blob/4d57a36859111b927f08a0b99fe04ccfbc4ed22e/integrations/claude-code/scripts/cognee_statusline_render.py#L1)、[MCP移除说明](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee-mcp/src/server_utils.py#L242)、[禁止统计调用的测试](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee-mcp/tests/test_recall_summary.py#L151)。
 
 下面继续使用六个实体的小图。为解释统计，把边的箭头暂时忽略，因为当前 Cognee GDS 投影把关系设置成 `UNDIRECTED`（无向）：
 
@@ -720,7 +780,7 @@ WCC是“弱连通分量”的缩写。对初学者，可以先问：“忽略�
 
 有100个分量不一定意味着图同样碎散：“一个大分量＋99个孤立点”和“100个均匀小分量”很不同，大小列表提供了这个区别。
 
-**AGE如何替代：**上一步遍历时顺便统计每组大小；一次计算就能产出“组数”和“大小”，不必为了复制两个GDS名字再遍历两次。当前基础适配W6包含这两项结果。
+**AGE如何替代：**上一步遍历时顺便统计每组大小；一次计算就能产出“组数”和“大小”，不必为了复制两个GDS名字再遍历两次。此前完整交付范围的W6b包含这两项结果；可独立晚于记忆主流程交付，未交付时不开放相应分析。
 
 **过程6：`gds.allShortestPaths.stream`——各对节点之间，最少隔几条边？**
 
@@ -770,23 +830,30 @@ WCC是“弱连通分量”的缩写。对初学者，可以先问：“忽略�
 
 本例的组数、组大小、局部聚类系数和指定点对距离经过独立算术核对；这是验证讲解自洽，不是GDS或AGE运行结果。
 
-### 把十个调用放回用户操作里，AGE适配范围就清楚了
+### GDS七项缺失的用户后果：直接影响与连带影响分别看
 
-| 用户操作 | 相关调用 | 不替代的用户后果 | AGE适配范围 |
-|---|---|---|---|
-| 导入/重复导入文档 | `apoc.coll.toSet` | 节点写入失败；随意删除该调用又可能丢集合归属 | 合并去重及并发状态维护，基础已含 |
-| 写实体、文档等不同模型 | `apoc.create.addLabels` | 节点写入失败，或类型筛选漏查 | 类型/标签存储和查询映射，基础已含 |
-| 批量写参与、维护等关系 | `apoc.merge.relationship` | 边写入失败，可能已有节点和向量的中间状态 | 按类型批写、身份约束和重试，基础已含 |
-| 请求基础图统计 | `gds.graph.list`、`gds.graph.drop`、`gds.graph.project` | 原算法准备流程失败 | 可以采用新计算路径，不必复制GDS目录协议 |
-| 请求基础图统计 | `gds.wcc.stats`、`gds.wcc.stream` | 缺少分量数和分量大小 | 连通分量算法，基础W6已含 |
-| 请求额外图统计 | `gds.allShortestPaths.stream` | 缺少直径和平均距离 | O3选配，大图性能另验 |
-| 请求额外图统计 | `gds.localClusteringCoefficient.stats` | 缺少平均聚类系数 | O3选配，大图性能另验 |
+| 缺失项 | 何时会走到这里 | 直接失去的能力 | 当前代码的连带影响 | AGE适配与交付时点 |
+|---|---|---|---|---|
+| `gds.graph.list` | 基础统计检查内存投影 | 原统计路径不能判断投影是否存在 | 准备阶段就失败，整个metrics不返回；摘要入口可能降级0 | 新算法可完全不设GDS目录。启用统计前换掉原调用，不需复制同名过程 |
+| `gds.graph.drop` | 统计开始且旧投影存在 | 原路径无法清理旧计算投影 | 有旧投影的该次统计可能失败；不是删不了持久知识 | 管理自己的临时计算状态；不影响正常文档删除合同 |
+| `gds.graph.project` | 基础统计建立新投影 | 无法给后续原GDS算法准备内存图 | 之后的WCC等无法执行，计数结果也未能正常返回 | 可直接读目标图拓扑计算；不是AGE必须增加GDS投影功能 |
+| `gds.wcc.stats` | 基础统计，`False`也调用 | 不知道知识图有几个互不连通的部分 | 未隔离异常时，整个基础metrics失败，摘要计数也受牵连 | 连通性分析启用前实现；仅做会话可延期，启用摘要则须先解耦count路径 |
+| `gds.wcc.stream` | 同上，聚合各分量大小 | 不知道每个连通团体有多少节点 | 同样可能使整次基础metrics失败 | 与WCC数量一次遍历产出，两项一起验收 |
+| `gds.allShortestPaths.stream` | 仅`include_optional=True` | 缺直径和平均最短路径长度 | 当前完整metrics缺失败隔离，该请求会失败；`False`路径不因此调用它 | O3选配；点对可达/无穷值和计算预算另验，不是普通邻域检索前置 |
+| `gds.localClusteringCoefficient.stats` | 仅`include_optional=True` | 缺平均聚类系数，无法衡量邻居间连接紧密程度 | 当前完整metrics请求可能失败；不是反馈权重或答案评分失效 | O3选配；算法/图规模单独验证，不作为常规会话上线门槛 |
 
-七种GDS过程不是每次都固定执行七次：旧副本存在时才drop，目录检查可能执行多次，最后两种算法仅在 `include_optional=True` 时运行。
+七种过程不是每次固定执行七次：旧投影存在才drop，目录检查可能多次，最后两种算法只在optional开启时执行。源码依据是上述[Neo4j统计顺序](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2333)及各算法函数；本轮没有把缺插件运行实验伪装成已实测结果。
 
-基础图摘要还有一个需要知道的用户现象：当前计数代码会捕获metrics错误，返回该dataset节点数0、边数0、`computed_at=None`，不写成功缓存。**因此缺GDS可能表现为“摘要显示0”，而不是整个API报错；数据并未因此被删除。**普通HYBRID/GRAPH_COMPLETION则通过图读接口检索，代码没有把这七种GDS过程放进其普通召回/排序链。[异常处理](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L83)。
+**“已有记忆但摘要显示0”是怎样发生的？**以已正常存好的星河图为例：定制管理页请求摘要→没有该run的计数缓存→调用Neo4j完整基础metrics→其中GDS调用报错→摘要层捕获异常→返回0节点/0边且`computed_at=None`，不写成功缓存。下一次摘要请求可能重复这条失败链。图没有因此被删，旧数据仍可能正常检索。这里的缺陷是结果误导及额外失败请求，不是每轮Claude对话都被阻断。[回退代码](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L80)。
 
-三种APOC行为与基础WCC统计纳入AGE标准功能范围；额外统计、公开Cypher/NL及任意用户插件另行限定。完整预算见本篇第11节。
+### 分阶段改造：不实现GDS库，也不伪装统计成功
+
+1. **先保证写入与检索。**完成三种APOC对应业务、身份/来源/状态与图读合同。用A/B文档合并、重复导入、关系查询和失败恢复验收；不能把GDS测试通过当成这些测试的替代。
+2. **需要展示规模时，先拆出准确计数。**在图接口/目标adapter增加轻量节点边计数方法，或实现单独的count服务；将`get_datasets_graph_counts`改接该路径，保留dataset上下文、缓存和权限。失败状态与真实0分开表达，并同步修改API响应/前端消费。这是待开发方案，当前代码不会自动解耦。若先不做，则不启用相应摘要功能。
+3. **需要连通性分析时再交WCC。**使用目标后端算法，或完整导出规模上限内的目标图再计算数量/大小；超限明确拒绝或标不可用，不能截断部分拓扑后冒充全图WCC。延期时关闭分析入口，或显式扩展返回与消费合同表达“不支持/未计算”；不能删除调用后直接填0，也不能只设置`include_optional=False`。此前标准预算包含WCC，是报告选定的完整交付范围，不是普通session依赖。
+4. **按需增加昂贵统计。**全点对路径和聚类保留O3单独预算，限制图规模、超时和内存；未启用就不运行。若只交基础记忆服务，不因为这两项未交付而判定整个后端不可用。
+
+验收要对应承诺：可以交付“普通记忆功能通过、摘要未启用、结构分析暂不支持”的明确阶段版本；不能交付“统计返回假0，却声称完整兼容”的版本。以上分期不降低来源/租户/并发正确性要求，实际Agent预算与范围口径见第11节。
 
 <a id="age-performance"></a>
 ## 7. AGE执行机制：性能收益有可能，但不是“换Cypher就没有JOIN”
@@ -876,7 +943,7 @@ flowchart LR
 | **truth 学习**：[truth 构建](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/truth_subspace/build.py#L409)、接口 get/set truth | 2个方法，alignment列表和epoch联合持久化；内容变化的失效与重建策略 | 现有 truth 计算、epoch 发布和检索门禁 | 节点坐标与epoch一致；失败/旧epoch不会被当成新状态 |
 | **局部更新与事实有效期**：[close_node](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/close_node.py#L37)、user_preferences/store | 实现 `update_node`，明确缺失字段、显式null、整模型重写的区别 | 上层事实关闭/偏好操作 | 不存在返回False；未指定字段保留；valid_to不被后续普通入图擦除 |
 | **图检索、可视化和 triplet**：[CogneeGraph](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/graph/cognee_graph/CogneeGraph.py#L124)、HYBRID/entities、memify triplet task | 实现6个抽象图读方法、`get_triplets_batch`；建议补 `get_id_filtered_graph_data` 和 top-degree，避免默认全图读取 | 现有向量召回、图排序、LLM回答、导出流程 | seed/跳数/方向/诱导边/NodeSet筛选与现有合同一致；分页不漏不重 |
-| **基础图统计**：[dataset counts](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L86)、[PG demo metrics](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L879) | 实现 `get_graph_metrics`，包含节点/边计数、均度、密度、连通分量及约定返回键 | 可参考已有 Python 连通分量实现；算法本身不要求GDS | 基础统计准确，未计算的选配指标按明确约定返回；不把未算值伪造为0 |
+| **图摘要与结构统计，分别验收**：[dataset counts](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/data/methods/get_datasets_graph_counts.py#L86)、[PG demo metrics](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L879) | 摘要需轻量准确计数及失败状态；结构分析另实现WCC等metrics。若先交count后交WCC，须改接口/调用/消费合同并设能力门禁 | 现有缓存、PG demo的Python WCC可参考；均不要求GDS协议 | 只对启用功能承诺准确结果；未算/失败不伪造0。WCC不可用不作为正常入图检索的统一阻断项 |
 | **TEMPORAL 检索**：[temporal_retriever](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/temporal_retriever.py#L131) | 额外实现 `collect_time_ids/collect_events`，它们不在47方法里；沿用UTC毫秒时间边界和Timestamp→Event邻域语义 | 时间抽取、向量部分和调用流程 | 按当前范围/1～2跳事件关联返回正确结果，不偷换成另一套区间算法 |
 | **公开 Cypher / 自然语言图查询**：[NL retriever](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/modules/retrieval/natural_language_retriever.py#L84)、[Neo4j prompt](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/llm/prompts/natural_language_retriever_system.txt#L1) | 另做AGE query返回协议、方言prompt、真实schema注入及能力门禁；初期明确关闭 | API入口及部分生成/重试流程 | 不生成APOC/GDS或Neo4j shortestPath；明确支持的AGE语法与错误 |
 
@@ -884,7 +951,7 @@ flowchart LR
 
 有四处尤其不能漏估：
 
-1. **统计必须做，GDS 协议不必照搬。**Neo4j 的 `get_graph_metrics(False)` 仍会投影 GDS 图并计算 WCC；不能称它全是可选功能。但 PG demo 已经通过自身 Python 算法返回基础统计，证明 Cognee 依赖统计结果，并非依赖 `gds.*` 的过程协议。[Neo4j metrics](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2333)、[PG metrics](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L879)。大图计算成本仍需单独验收。
+1. **按启用功能决定统计范围，不能与写入归为同级。**普通记忆上线必须满足写入/检索/来源合同；启用摘要前须给出准确计数和明确错误，启用结构分析前再交WCC。当前Neo4j `get_graph_metrics(False)`仍投影并计算WCC，因此若先交轻量摘要，必须改接计数路径，不能只关optional。PG demo已有独立Python算法，证明不必复制`gds.*`协议；这不代表必须在会话上线前实现所有统计。[Neo4j metrics](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/neo4j_driver/adapter.py#L2333)、[PG metrics](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/infrastructure/databases/graph/postgres_demo/adapter.py#L879)。
 2. **upsert 不能只写 `SET +=`。**重新 cognify 的输入带模型默认值，可能重置 feedback、truth、valid_to；单纯合并又可能留下应删除的业务属性。需定义业务字段、学习状态、来源归属的所有权，显式区分“未传”和“重置”。AGE1.8 的 MERGE actions 只能帮助分流，不能自动规定这些规则。
 3. **多跳返回值不等于返回路径列表。**Cognee 邻域先形成节点集合，再取相关诱导边；直接拿 AGE VLE 返回的路径边不一定等价。要验证孤立 seed、重复路径、方向和边类型过滤边界，不能认为一条 `MATCH ...[*]` 就已完成适配。
 4. **同一个 PG 不自动获得跨 adapter 原子事务。**当前存储任务分别调用 graph 和 vector 写入；仍需重试、补偿和失败恢复。AGE＋PGVector 共用服务器不改变这条代码事实。[写入次序](https://github.com/topoteretes/cognee/blob/663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e/cognee/tasks/storage/add_data_points.py#L250)。
@@ -929,11 +996,11 @@ PG demo现状：4feedback、2truth、update_node都未override；来源15、增�
 | 来源与删除 | Cognee已有来源规划和15接口，可复用上层 | 文档A/B共享实体，删A仍保留B；run rollback不误删历史来源 |
 | 学习/事实/Temporal | SET和现有公式/epoch编排可复用 | 不重置0.9，不擦valid_to，epoch发布一致；2个时间接口单验 |
 | 图检索 | MATCH/VLE有实现，公共返回合同明确 | 孤立seed、无向拓展/原向返回、诱导边完整，别只回路径边 |
-| 基础统计 | PG demo已经不用GDS实现WCC字典 | 图筛选口径、元数据排除、结果字典所有键；大图取数/内存 |
+| 摘要/结构统计 | PG demo已不用GDS实现WCC字典；也可设计独立count路径 | 按启用范围验收；先count后WCC须改消费合同，不填假0；图筛选口径和大图资源另验 |
 | 多租户 | Cognee提供dataset handler注册点 | owner+dataset绑定、删除生命周期、连接权限、100用户负载 |
 | raw/NL | 可以声明AGE方言并换prompt | 自定义语料/错误处理；任意Neo4j/APOC/GDS不在承诺内 |
 
-建议只新增图adapter、codec、schema、dataset handler及必要注册，不修改AGE内核作为默认方案。固定业务label+UUID属性及唯一索引，关系类型受控模板，来源/metadata与图写同事务；AGE作为图权威存储，不再保留另一套普通PG图并异步复制。若PoC发现所选UUID表达式或权限路径不能满足目标合同，先调整模型/方案，再决定是否扩大内核改动范围。**“可进入PoC”与“已证实生产可行”之间，隔着真实数据库与负载验证。**
+图后端主体新增adapter、codec、schema、dataset handler及必要注册，不默认修改AGE内核；若选择先交轻量摘要、后交WCC，还需修改计数入口以及返回/消费合同，不能把这部分上层改动漏出范围。固定业务label+UUID属性及唯一索引，关系类型受控模板，来源/metadata与图写同事务；AGE作为图权威存储，不再保留另一套普通PG图并异步复制。若PoC发现所选UUID表达式或权限路径不能满足目标合同，先调整模型/方案，再决定是否扩大内核改动范围。**“可进入PoC”与“已证实生产可行”之间，隔着真实数据库与负载验证。**
 
 ### 8.3 接入细节不能遗漏
 
@@ -1288,9 +1355,11 @@ WCC额外原因：无向变长路径可返回起点，COLLECT(DISTINCT m.id)含�
 | W3 schema、索引、handler、隔离 | schema.py、DatasetHandler、注册/配置；生命周期和多dataset隔离测试 | 6～12小时 | W1之后由实现B负责；与W2共享已冻结合同 |
 | W4 来源、rollback、增量 | 15个来源/metadata方法＋detag/chunk更新；共享删除、回滚和补偿用例 | 10～20小时 | W2/W3基础可用后，A负责；可与W5/W6并行 |
 | W5 feedback、truth、update_node、Temporal | 7状态接口＋2时间方法；epoch、状态保留和事实有效期测试 | 8～16小时 | 同上，B先负责；状态字段合同不能临时各自定义 |
-| W6 图读、视图、基础metrics、分页 | 6图读、ID筛选优化、连通分量、分页及参考后端结果对照 | 6～12小时 | 基准安排B完成W5后接W6；不虚构第三个实现Agent同时开工 |
+| W6a图读/分页；W6b摘要/基础metrics | W6a：6图读、ID筛选、分页和参考结果对照；W6b：摘要计数/失败隔离、WCC与统计合同 | 合计6～12小时，原预算未单独测量 | W6a是记忆检索验收项；W6b按摘要/分析启用范围独立验收。原完整排期仍由B在W5后完成两部分 |
 | W7 端到端、故障、代表性性能、文档 | cognify/search/forget/update/improve闭环；冷热、重连、并发和恢复记录 | 8～16小时 | 所有必需模块合入后，验证Agent主执行，实现Agent处理发现的问题 |
 | **W1～W7主执行合计** | **每包已包含局部测试与常规修复** | **52～104 Agent小时** | **不是52～104小时的串行工期** |
+
+**范围与优先级不是同一件事：**下列80～170 Agent小时、3～6日仍是包含W6b基础统计/WCC的原完整范围预算。将W6a/W6b分开，是为了允许按产品需求分阶段验收，不代表WCC是每次session必需。若先交记忆、后交统计，首轮Agent实跑后单独重估；未有数据前不从总工期机械减去几小时。解除摘要与WCC耦合的具体接口改造，也须在W1明确并校准W6b预算。
 
 独立代码评审/反例验证再预留12～24 Agent小时，协调/集成预留4～8 Agent小时：**常规执行总量68～136 Agent小时**。这里的独立验证不重复计W7已列的端到端运行；它核查实现、补充遗漏反例并复审修复。为新增失败场景和返工另留12～34 Agent小时，资源预算暂取 **80～170 Agent小时**。以上均为调度假设，不是已经消耗或测得的时长。
 
@@ -1306,7 +1375,7 @@ flowchart LR
     B --> S
     S --> C[W4 来源与增量]
     S --> D[W5 学习与时间]
-    D --> E[W6 图读与统计]
+    D --> E[W6a 图读 / W6b 统计分别验收]
     C --> I[W7 端到端与故障验证]
     E --> I
 ```
@@ -1316,7 +1385,7 @@ flowchart LR
 | 交付层级 | 当前Agent排期口径 | 达到什么，不混作什么 |
 |---|---|---|
 | 可复现PoC | W1主执行6～12小时，校准前按约半天～1天观察窗安排 | 核心原语真实跑通；不是47方法和业务闭环已交付 |
-| 标准功能验收版 | **最多4并发Agent，暂排3～6自然日；预算80～170 Agent小时** | 包含此前承诺的唯一性、3种APOC行为替代、来源/学习/时间、基础统计和所列验证 |
+| 标准功能验收版 | **最多4并发Agent，暂排3～6自然日；预算80～170 Agent小时** | 原完整范围含唯一性、3种APOC行为、来源/学习/时间及W6b基础统计；统计与记忆分开验收，不据此将所有能力划成同一优先级 |
 | 生产上线与任意查询兼容 | 暂不报固定天数 | 缺目标数据规模、SLA、部署和迁移清单；不能把生成代码完成当作生产验收 |
 
 **哪些选配仍要另算，但也全部由Agent完成？**
@@ -1325,7 +1394,7 @@ flowchart LR
 |---|---:|---|
 | O1 受限公开AGE raw Cypher | 4～8小时 | 稳定query/codec之后；公共参数、返回列、权限、取消和错误协议 |
 | O2 AGE自然语言查询 | 8～16小时 | 依赖O1或同等通道；prompt/schema和查询生成语料回归，受模型/API吞吐影响 |
-| O3 完整昂贵统计 | 6～12小时 | 可与O1/O2并行；只对明确有界数据实现和验证精确结果，不含大图SLA优化 |
+| O3 全点对路径/聚类等昂贵统计 | 6～12小时 | 仅业务要求并启用时实施；可与O1/O2并行，仅验有界数据，不含大图SLA；不阻断未承诺这些指标的普通记忆交付 |
 | O1～O3合计 | **18～36主执行Agent小时** | 另留独立评审及跨功能集成时间；不能直接加成自然日 |
 | 旧图迁移、用户自定义Task/过程、生产HA及AGE内核修改 | 按实际清单和首轮实跑再估 | 交给Agent执行不意味着未知范围可以免费或瞬时完成 |
 
@@ -1375,7 +1444,8 @@ ArcadeDB虽已有CRUD，缺口仍横跨版本依赖、handler、来源15接口�
 | 检索 | 孤点、链、环、hub、同名实体、NodeSet | UUID/方向/深度/诱导边/过滤一致 | 问答可能使用不完整或错误上下文 |
 | 学习 | 正负反馈、truth部分失败和epoch发布 | 逐ID成功结果真实；不支持明确跳过 | capability存在却没有有效学习 |
 | 时间 | 区间端点、UTC毫秒、空时间、跨区间事件 | 符合当前Timestamp→Event合同；区间相交改进另测 | 存日期字段不等于Temporal支持 |
-| 指标 | 孤点、3/5节点链、三角尾、六节点教学图 | 与独立精确算法一致，未算/失败不伪装0 | 图看板误导；不能将统计成功当作理所当然 |
+| 摘要（启用时） | 图非空、缓存命中/未命中、计数失败、结构统计不可用 | 准确计数；失败不伪装0；不因未启用的WCC/APSP被阻断 | 管理页可能把已有记忆误显示为空；未启用摘要不阻断普通会话 |
+| 结构指标（启用时） | 孤点、3/5节点链、三角尾、六节点教学图 | 已承诺的WCC/optional指标与精确算法一致；未支持明确标识或入口关闭 | 只阻断相应统计功能验收，不能统一阻断正常入图/检索；也不能声称完整metrics兼容 |
 | 租户 | 甲乙相同UUID，不同dataset；共享授权与未授权 | 私有不串数据，共享正确绑定owner | 单图功能通过仍不代表100用户隔离成立 |
 | 故障 | graph成功vector失败、断连、取消、进程退出 | 可重试可恢复，来源不误删 | 同实例/同服务没有提供所需业务原子性 |
 | 迁移 | 导出→目标导入→查询/删除/学习对照 | UUID、来源、状态、向量索引及ACL全部核对 | 改provider不能视为已迁移完成 |
@@ -1383,6 +1453,8 @@ ArcadeDB虽已有CRUD，缺口仍横跨版本依赖、handler、来源15接口�
 ### 12.2 “100用户”必须转换为可重放的负载，而不是一个数字
 
 分别建立100用户各1dataset、100用户共享1dataset，以及每用户多个dataset的样本；请求并发从1、6、20到100逐档提高。这里是测试输入，不是已通过容量。每档固定并公布节点/边/chunk数、平均及最大度、写入批次、读取深度、共享热点比例和LLM配置。
+
+**负载也按调用路径拆开：**普通Claude插件的会话采集、recall和条件触发improve是一组；定制客户端主动请求摘要的缓存命中/未命中是一组；WCC与optional昂贵统计再单列。不能假定每轮聊天都会运行GDS，从而把全图统计成本摊到所有session；也不能关闭真实存在的自动improve后声称测到了完整插件负载。
 
 分别记录排队时间、数据库执行、图结果传输、应用排序、embedding/LLM耗时，以及P50/P95/P99、错误率、RSS、CPU、连接数、文件句柄、缓存命中和冷启动。数据库慢与LLM慢必须能区分。对同dataset混合remember/recall/improve/forget/update，再做进程重启、连接中断、缓存驱逐与备份恢复。
 
