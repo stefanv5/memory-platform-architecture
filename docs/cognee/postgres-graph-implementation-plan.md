@@ -1,5 +1,7 @@
 # Cognee 图能力落到 PostgreSQL：数据模型、改造位置与工作量
 
+> 交付方式更新：本项目按全Agent开发执行，本文历史人工人日估算不再作为当前排期依据。AGE路线的Agent资源、任务依赖和初始预算见[兼容矩阵第4部分](apache-age-compatibility-matrix.md)；该预算不直接套用于普通PG路线。
+
 2026-09-28 补充：[Apache AGE 专题](apache-age-feasibility-analysis.md)进一步核验专用图扩展路线，包含正式版本、固定跳/VLE 的真实执行机制、Cognee 接入与华为云 RDS 安装边界。本文讨论的普通 PG 数据表达能力，不构成其性能优于图扩展的结论。
 
 分析日期：2026-09-24。源码基线：Cognee `663a2dc15d04bc0d7ec2733a2dd604b7ed1b8c8e`。本文承接[图存储与 PG 替换分析](graph-storage-postgres-analysis.md)，聚焦开源 PG adapter 的补齐与工程化；[Cognee / Hindsight 架构对比](../competitive-landscape/05-code-architecture-cognee-vs-hindsight.md)另见专题。

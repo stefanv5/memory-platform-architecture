@@ -116,6 +116,6 @@ GraphDBInterface:35–46定义：节点ID为str(DataPoint.id)；边唯一身份�
 
 当前内置业务中，**必须替代**的是APOC承载的节点标签/集合和批量边写，以及基础metrics的统计产出；不是必须实现APOC/GDS兼容库。**选配替代**的是include_optional=True的全源最短路/聚类统计，以及公开NL/raw Cypher方言。**无法统一承诺**的是用户任意APOC/GDS算法与外部Task。
 
-这些工作已分别在上一稿W2（CRUD/codec）、W4（来源和字段归属）、W6（基本metrics）计价，不能因这次把过程名展开而再次整体加钱。O3（完整昂贵统计）的2–5人日只适用于固定有界数据、明确统计口径的实现与回归，不包含目标大图SLA优化；O1/O2负责公开查询。若用户需要新增轻量summary计数接口，才新增小范围上层改造并在PoC后重估；数据库扩展本身缺失不属于adapter人日。
+这些工作已分别在上一稿W2（CRUD/codec）、W4（来源和字段归属）、W6（基本metrics）计价，不能因这次把过程名展开而再次整体加钱。工作量现按[主报告第4部分](../apache-age-compatibility-matrix.md)的全Agent口径计量，旧人工人日不再适用。O3（完整昂贵统计）的Agent预算只适用于固定有界数据、明确统计口径的实现与回归，不包含目标大图SLA优化；O1/O2负责公开查询。若用户需要新增轻量summary计数接口，才新增小范围上层改造并在PoC后重估；数据库扩展本身缺失属于部署阻断，不由adapter Agent预算覆盖。
 
 实际精读范围：Neo4j adapter 213–280、306–440、1125–1171、1205–1282、2213–2370；neo4j_metrics_utils全部191行；来源/存储add_data_points 250–346；run_tasks错误292–350；dataset counts完整文件（前轮与本轮核对）、summary router750–786及visualize455–477；对应counts失败单测163–191；NL121–185与Cypher检索异常段；PG tables27–61、prepare46–117、upsert348–380/471–511；DataPoint60–125。未宣称全仓逐文件阅读；全仓文本搜索仅用于排查内置APOC/GDS调用落点。
