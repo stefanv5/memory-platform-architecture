@@ -2,7 +2,7 @@
 
 基于源码的 AI 记忆平台架构研究：Cognee 云化、多租户、集群、持久化与可替换引擎设计。
 
-- [Hindsight Serverless 华为云落地架构·V2.1（最新，经五维评审修订）](docs/hindsight/huawei-cloud-serverless.md)
+- [Hindsight Serverless 华为云架构·V3.1（最新，两轮共九维评审）](docs/hindsight/huawei-cloud-serverless.md)
 - [平台通用参考扩展·代码骨架（租户解析/配额/计量）](docs/hindsight/platform-reference-extension.md)
 - [Hindsight Serverless 多租户架构方案·V1（云中立设计）](docs/hindsight/serverless-multi-tenant.md)
 - [Apache AGE替代Cognee图后端：能力、缺口、触发流程、改造与Agent成本](docs/cognee/graph-storage-postgres-analysis.md)
