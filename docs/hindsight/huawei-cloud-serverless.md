@@ -118,6 +118,121 @@ flowchart TB
 
 ---
 
+### 1.4 架构细化：连接机制与"无状态"的物理实现
+
+本节回答到连接机制级别：ELB 怎么挂 API 组、会话是否亲和、API 与 worker 到底怎么对接、客户数据落在哪个 PG、worker 无状态的准确含义、横向扩展时发生什么。
+
+**先给全案最重要的一句话：API 组与 Worker 组之间没有任何连接——没有服务发现、没有消息中间件、没有 IP 感知。它们唯一的"对接点"是 RDS 里的一张表（`async_operations`）。** API 只往表里 INSERT，worker 只从表里 SELECT。理解了这一点，"无状态"和"横向扩展"就全部顺理成章。
+
+#### 1.4.1 接入层：ELB → API 组怎么接、会话是否固定
+
+~~~mermaid
+flowchart TB
+  U["同一用户的两次请求"]:::external -->|"HTTPS :443"| ELB["ELB 监听器<br/>443 → 后端服务器组 api-tg（HTTP:8888）<br/>调度 = 加权轮询 · **无会话保持**<br/>健康检查 GET /health，3 次失败摘除"]:::commercial
+  ELB -->|"第 1 次请求可能落"| A1["api-ecs-1"]:::hs
+  ELB -.->|"第 2 次请求可能落"| A2["api-ecs-2"]:::hs
+  ELB -.-> A3["api-ecs-N"]:::hs
+  subgraph ASG["AS 伸缩组（api-tg 的成员来源）"]
+    A1
+    A2
+    A3
+  end
+  ASG2["AS 扩容：新 ECS → 容器就绪 → 健康检查通过<br/>→ **自动注册进 api-tg**（缩容反之自动摘除）"]:::platform -.-> ELB
+  A1 & A2 & A3 --> ST[("每实例上没有任何会话/任务/本地数据：<br/>请求上下文=contextvar（随请求生死）<br/>租户映射/bank配置=只读缓存（miss 自举）<br/>任务/数据/账本=全部在 RDS/OBS")]:::oss
+  SG["安全组：引擎 8888 端口仅接受 ELB 与 L2 鉴权服务"]:::platform -.-> A1
+  classDef hs fill:#DBEAFE,stroke:#2563EB,color:#172554;
+  classDef oss fill:#DCFCE7,stroke:#15803D,color:#14532D;
+  classDef platform fill:#FFEDD5,stroke:#C2410C,color:#7C2D12;
+  classDef commercial fill:#F3E8FF,stroke:#9333EA,color:#581C87;
+  classDef external fill:#F8FAFC,stroke:#64748B,color:#0F172A;
+~~~
+
+| 问题 | 答案 |
+|---|---|
+| ELB 怎么对接 API 组 | ELB 监听器（443 终结 TLS）→ **后端服务器组**（协议 HTTP、端口 8888、健康检查 `GET /health`）；后端组成员 = AS 伸缩组的实例，**AS 与后端服务器组关联后扩缩容自动注册/摘除**，无需手工改 ELB |
+| 用户会话固定到某个 API 吗 | **不固定，加权轮询。** 为什么不需要：① 请求无会话状态（上下文在 contextvar 里随请求生死，`core/engine/memory_engine.py:92`）；② MCP 走 stateless 模式（§7.1）；③ 实例内的租户/bank 缓存是共享数据源的只读副本，任何实例 miss 后自举。**建议显式不开启源 IP 会话保持**——粘性反而延长故障实例的流量恢复。唯一"粘"的是 HTTP keep-alive 连接复用（连接级，不是会话级，连接断了重建零成本） |
+| 多个 ECS 怎么"组成"无状态 | 同一镜像 + 同一份 env 配置（AS 组的启动模板），**实例之间互不知晓、互不通信**。无状态不是"把状态共享出去"，而是"每实例只持有可丢弃的派生数据"：能丢的（缓存、游标）丢了自重建；不能丢的（任务、数据、配置真相）根本不在实例上 |
+
+#### 1.4.2 API 组与 Worker 组的对接方式：一张表，零直连
+
+~~~mermaid
+flowchart TB
+  A["hindsight-api 实例（受理请求的那个，任意一台）"]:::hs
+  T[("async_operations 表（每租户 schema 各一份）<br/>列：status · worker_id · claimed_at · retry_count<br/>· serialization_key · bank_id · task_payload(内嵌 _schema)")]:::oss
+  W1["worker-ecs-1（worker_id=实例ID）"]:::hs
+  W2["worker-ecs-2"]:::hs
+  A -->|"① 受理：与业务写**同一个数据库事务**里 INSERT 任务行<br/>（幂等：bank 行锁去重）"| T
+  A --> OUT["202 + operation_id 返回客户端<br/>（此后这台 API 实例死了也无所谓——任务已在表里）"]:::external
+  T -->|"② 每 500ms 轮询：SELECT ... WHERE status='pending'<br/>**FOR UPDATE SKIP LOCKED** + bank/文档串行化谓词"| W1
+  T -->|"同一谓词（行级互斥，天然不冲突）"| W2
+  W1 -.->|"③ 执行：payload._schema 告诉它去哪个 schema 干活"| T
+  classDef hs fill:#DBEAFE,stroke:#2563EB,color:#172554;
+  classDef oss fill:#DCFCE7,stroke:#15803D,color:#14532D;
+  classDef external fill:#F8FAFC,stroke:#64748B,color:#0F172A;
+~~~
+
+| 问题 | 答案 |
+|---|---|
+| API 组如何对接 worker 集群 | **不对接。** API 只做 INSERT 后即返回；worker 主动轮询领取。API 不知道有几台 worker、worker 不知道哪台 API 提交的——两侧只共享表结构。这就是"以数据库为队列"的解耦（引擎源码事实：领取谓词 `core/engine/db/ops.py:144-198`，SKIP LOCKED `ops_postgresql.py:1598-1724`） |
+| 引擎层（API）如何"定位"worker 层 | **不定位。** 没有服务发现这一步。需要知道 worker 的只有**平台控制器**（为了回收/巡检），它看的是 AS 实例列表 + 跨 schema 的 `worker_id` 巡检（§5.5）——那是运维面，不在数据路径上 |
+| 为什么这样设计 | ① 两侧独立扩缩容/崩溃互不影响；② 任务与业务数据同事务=受理即持久（无消息中间件的丢消息窗口）；③ 并发控制在 SQL 谓词里，对任意数量 worker 正确（V1 §1.2） |
+
+#### 1.4.3 Worker 与存储层的对接 + "worker 无状态"的准确含义
+
+~~~mermaid
+flowchart TB
+  W["worker ECS 实例（worker_id = ECS 实例 ID，cloud-init 注入）"]:::hs
+  PB["PgBouncer（transaction 模式 ×2）"]:::oss
+  RDS[("RDS 引擎库")]:::commercial
+  W -->|"连接构成（每实例）：<br/>1 条轮询连接（schema 发现 + claim 批量领取）<br/>+ 任务执行连接（≤ slots，retain 插入/consolidation 批事务）"| PB
+  PB --> RDS
+  W -.->|"迁移 / CREATE INDEX CONCURRENTLY：**直连旁路**<br/>（HINDSIGHT_API_MIGRATION_DATABASE_URL，绕过 pooler）"| RDS
+  W --> TEI["TEI / LLM API"]:::oss
+  MEM["实例内存里只有：<br/>轮询游标（租户/bank 公平轮转——丢失只影响公平性重启即重建）<br/>活跃任务表（重启即放弃，由 DB 行接管）<br/>只读缓存（租户/bank 配置）"]:::platform -.存在于.- W
+  ST2["任务的**全部**状态在 DB 行上：<br/>status=processing · worker_id=本实例 · claimed_at<br/>进度 → result_metadata.progress（心跳式）"]:::oss
+  classDef hs fill:#DBEAFE,stroke:#2563EB,color:#172554;
+  classDef oss fill:#DCFCE7,stroke:#15803D,color:#14532D;
+  classDef platform fill:#FFEDD5,stroke:#C2410C,color:#7C2D12;
+  classDef commercial fill:#F3E8FF,stroke:#9333EA,color:#581C87;
+~~~
+
+**"worker 无状态"的准确表述：无本地持久状态，但有身份记账。** worker 不是纯无状态（它持有 processing 中的任务），关键是：① 执行中任务的状态权威在 DB 行（worker_id 只是记账标记，**不是亲和性**——任何 worker 都能执行任何任务，只要行被重置为 pending）；② 实例内存里的一切（游标、活跃表、缓存）都是可丢弃的派生物；③ 崩溃恢复协议：死实例的行留在 processing → 回收控制器跨 schema 重置为 pending（§5.5）→ 任意活 worker 在下一次轮询领取（at-least-once）。**所以"杀掉任意 worker 换一台新的"是安全操作——这就是它支持横向扩展的原因。**
+
+#### 1.4.4 客户数据定位链：某个客户的数据在哪个 PG
+
+~~~mermaid
+flowchart LR
+  REQ["租户甲的请求<br/>POST /v1/default/banks/team-proj/memories/recall"]:::external --> S1["① 验断言（HMAC）→ tenant_id = 甲"]:::platform
+  S1 --> S2["② 注册表缓存命中/查询：<br/>甲 → cell_id=cell-a，schema=t_3f2a91c0d4e2"]:::platform
+  S2 --> S3["③ cell-a = 这套引擎部署对应的<br/>**RDS PG 实例 A**（引擎库）"]:::commercial
+  S3 --> S4["④ 该实例上 schema t_3f2a91c0d4e2<br/>的 22 张表"]:::oss
+  S4 --> S5["⑤ SQL：\"t_3f2a91c0d4e2\".memory_units<br/>WHERE bank_id = 'team-proj'（bank = schema 内行分区）"]:::hs
+  classDef hs fill:#DBEAFE,stroke:#2563EB,color:#172554;
+  classDef oss fill:#DCFCE7,stroke:#15803D,color:#14532D;
+  classDef platform fill:#FFEDD5,stroke:#C2410C,color:#7C2D12;
+  classDef commercial fill:#F3E8FF,stroke:#9333EA,color:#581C87;
+  classDef external fill:#F8FAFC,stroke:#64748B,color:#0F172A;
+~~~
+
+| 问题 | 答案 |
+|---|---|
+| 某个客户的数据存在哪个 PG | 四级定位链：**租户 →（平台注册表 `tenants.cell_id`）→ Cell →（该 Cell 的引擎 RDS 实例）→ schema（`tenant_schemas.schema_name`）→ 表内 bank_id 行**。一个租户的全部数据整体在一个 schema 里，不跨 Cell 分裂；强隔离租户的 Cell 是独立 RDS 实例（§4.3） |
+| 引擎怎么"找到"这个 schema | 请求时：TenantExtension 验断言 → 查注册表（进程内 TTL 缓存）→ 返回 schema 名 → contextvar → **所有 SQL 拼全限定表名**（`fq_table`，`core/engine/schema.py:16-27`）。任务执行时：payload 内嵌 `_schema`，worker 恢复上下文。**没有任何"数据源切换/连接切换"——同一个连接池，只是 SQL 文本里的 schema 前缀不同**（这就是 pooler 友好的原因，V1 §1.1） |
+
+#### 1.4.5 横向扩展：加一台实例到底发生什么
+
+| | API 组 +1 实例 | Worker 组 +1 实例 |
+|---|---|---|
+| 触发 | 采集器判定 lane 占用率超阈（§5.3）→ 调 AS API | 采集器判定有活 bank 数超阈 → 调 AS API |
+| AS 动作 | 按启动模板建 ECS → 拉容器（镜像预烘焙，无模型权重）→ `initialize()`（DB 连接+TEI 探活）→ `/health` 就绪 | 同左 + poller 启动开始轮询 |
+| 接入流量 | 健康检查通过 → **自动注册进 ELB 后端** → 立即分到请求（无预热：缓存 miss 自举） | **没有人需要知道它**——下一次 claim 的 SKIP LOCKED 自然把行分给它 |
+| 生效上限 | 连接预算（§8.1 反推 AS max）；lane 并发 × 实例数 | slots × 实例数；**同 bank 串行化谓词意味着单 bank 不因加 worker 变快**——并行度来自 bank/文档维度 |
+| 减实例 | ELB 摘除 + 排空在途请求；无状态零损失 | 优雅退出：30s drain + 释放自己的 processing 行；异常终止 → 回收控制器（§5.5） |
+
+**有效扩展的边界（重要）**：加 worker 对"很多 bank 各有一点活"的场景线性有效；对"一个 bank 堆了 100 个 consolidation"无效（谓词只放一个在飞）——这正是伸缩指标用"有活 bank 数"而非"总队列深度"的原因（§5.3，沿用 V6 的伸缩告诫）。
+
+---
+
 ## 2. "Serverless" 在 ECS 形态下的语义边界（诚实声明）
 
 三承诺拆解：①客户不管服务器 ✅ ②计算自动弹性 ✅（但见端到端时延预算 §8.3）③空闲归零 ⚠️ 部分达成——ECS 从镜像启动到引擎就绪需分钟级，因此 API 组 min 2（跨 AZ）、Worker 组 min 1（拉取式队列必须有人守着）、PgBouncer/TEI 常驻。**端到端扩容时延**（指标刷新 30s + 采集周期 30-60s + 告警持续 3min + 冷启动 2-3.5min）≈ **6-8min**——这才是 SLO 决定因素，min 基线与告警提前量据此设计（§8.3）。存储与平台服务费用常在。演进：L3 换 CCE Autopilot（秒级弹性/归零）时 **L1/L2/L4 与元数据模型完全不变**——计算形态是可替换的实现细节。
