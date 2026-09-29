@@ -1,6 +1,6 @@
 # Hindsight 多租户 Serverless 架构设计（华为云·V3.1，经第二轮四维评审修订）
 
-**V3 重写说明**：V2 及之前版本按"评审发现"组织，信息分散在各节。本版按**关注点**重组为单一自包含文档：每章讲完一件事（总览 / 架构决策 / 数据与映射 / 无状态 / 数据流 / 多租户 / 扩展），不需要跨章跳读。**V3.1 修订**（第二轮评审：清晰度新读者测试 / 架构决策对比 / 数据模型与寻址 / 无状态与扩展，15 严重项全部采纳）：ADR 重写为五方案对比（A-1/A-2/A-3/B'/B）并修正了 A2 事实错误；异步任务寻址机制更正为"认领时注入"两段式；数据清单补墓碑表/变更时间线/bank 画像/任务载荷快照并限定"可重建"范围；新增 §3.4 来源账本双存关系；修正 MCP 默认 stateful 陷阱与"零丢失"表述；连接预算拆为 RDS/PgBouncer 两侧。评审记录、扩展代码骨架、引擎源码事实详见文末"关联文档"。基线：Hindsight `12f2d54`，`core/` = `hindsight-api-slim/hindsight_api/`。华为云产品能力均为待 POC 假设（§10）。
+**V3 重写说明**：V2 及之前版本按"评审发现"组织，信息分散在各节。本版按**关注点**重组为单一自包含文档：每章讲完一件事（总览 / 架构决策 / 数据与映射 / 无状态 / 数据流 / 多租户 / 扩展），不需要跨章跳读。**V3.1 修订**（第二轮评审：清晰度新读者测试 / 架构决策对比 / 数据模型与寻址 / 无状态与扩展，15 严重项全部采纳）：ADR 重写为五方案对比（A-1/A-2/A-3/B'/B）并修正了 A2 事实错误；异步任务寻址机制更正为"认领时注入"两段式；数据清单补墓碑表/变更时间线/bank 画像/任务载荷快照并限定"可重建"范围；新增 §3.5 来源账本双存关系与 §3.4 非 PG 数据清单；修正 MCP 默认 stateful 陷阱与"零丢失"表述；连接预算拆为 RDS/PgBouncer 两侧。评审记录、扩展代码骨架、引擎源码事实详见文末"关联文档"。基线：Hindsight `12f2d54`，`core/` = `hindsight-api-slim/hindsight_api/`。华为云产品能力均为待 POC 假设（§10）。
 
 ---
 
@@ -27,12 +27,12 @@
 
 ~~~mermaid
 flowchart TB
-  C["客户端<br/>SDK / MCP / coding-agents"]:::external
+  C["客户端<br/>SDK / MCP / coding-agents<br/>（请求携带：① API key ② bank 名）"]:::external
 
   APIG["APIG（华为云 API 网关）<br/>TLS · 限流 · 调 L2 做认证"]:::commercial
 
   subgraph L2["平台层（自研，ECS 双实例）——产品的大脑"]
-    AUTH["鉴权/路由服务<br/>验 API key → 查注册表 → 决定请求去哪个 Cell<br/>注入签名断言 header"]:::platform
+    AUTH["鉴权/路由服务<br/>输入：API key 哈希 → 查平台库<br/>输出：租户ID / Cell / schema 名（仅供路由，不进断言）/ 允许的 bank<br/>＋ 生成签名断言（≤60s）注入 header"]:::platform
     CTRL["控制器：租户开通/worker 回收/版本升级/对账"]:::platform
     MEV["计量接收 → 平台库"]:::platform
   end
@@ -57,10 +57,14 @@ flowchart TB
     TEI["TEI 推理池<br/>embedding + rerank"]:::oss
   end
 
-  subgraph DATA["持久层（独立于引擎生死）"]
-    RDSE[("引擎库 RDS PG（Cell-A 绑定）<br/>public：跨租户例程<br/>t_3f2a… schema＝租户甲<br/>t_9b7d… schema＝租户乙<br/>（每 schema 同样 22 张表）")]:::commercial
-    RDSP[("平台库 RDS PG<br/>注册表 / api_keys / 配额 / 计量")]:::commercial
-    OBS[("OBS<br/>文档原件 + 来源账本对象")]:::commercial
+  subgraph DCUST["客户数据存储：引擎库 RDS PG 实例（每 Cell 一个）——只存客户记忆数据"]
+    RDSE[("引擎库（Cell-A 绑定）<br/>public：跨租户例程<br/>t_3f2a… schema＝租户甲<br/>t_9b7d… schema＝租户乙<br/>（每 schema 同样 22 张表）")]:::commercial
+  end
+  subgraph DPLAT["平台元数据存储：平台库 RDS PG 实例——独立实例、独立凭据、独立迁移"]
+    RDSP[("平台库<br/>注册表 tenants/tenant_schemas<br/>api_keys / 配额 / 计量 / 来源账本")]:::commercial
+  end
+  subgraph DOBJ["对象存储 OBS（独立桶）"]
+    OBS[("OBS<br/>文档原件对象（来源账本行存平台库）<br/>（引擎文件后端走 S3 兼容端点）")]:::commercial
   end
 
   LLM["LLM API<br/>（引擎原生支持 deepseek/智谱/火山/…）"]:::external
@@ -78,7 +82,8 @@ flowchart TB
   A1 & W1 --> LLM
   W1 -->|"⑦ 完成事件（计量）"| MEV
   W1 -->|"⑧ webhook 通知客户端"| C
-  A1 -.->|"文件原件"| OBS
+  AUTH -.->|"产品受理时归档原件（账本行写平台库）"| OBS
+  A1 -.->|"引擎文件后端（S3 兼容端点）"| OBS
   AUTH & CTRL & MEV --> RDSP
   CTRL -.->|"admin CLI 直连（开通/回收/迁移）"| RDSE
   SCALE -.->|"扩容=加引擎实例；扩容=加 Cell"| ROLE1 & ROLE2
@@ -153,7 +158,7 @@ flowchart TB
 | 一个 PG 故障的影响 | 该 PG 租户失败；计算组可整体漂移继续服务其他 PG（优点） | 只影响该 Cell 租户；该 Cell 引擎组闲置需人工重绑 |
 | 新 PG 上线/退役 | 对引擎透明 | 全套部署组+ELB+伸缩组+配置（运营动作） |
 | 连接管理 | 矩阵在引擎（A-1）或代理（A-2）层，不消失 | 每 Cell 一套池，预算有界可算（§7.3） |
-| 租户容量上限 | 全局 PG 数，无单 Cell 地板 | 受单 Cell 阈值；大租户超限须迁移（有机制，§7.2） |
+| 租户容量上限 | 全局 PG 数，无单 Cell 地板 | 受单 Cell 阈值；大租户超限须迁移（有机制，§6.2） |
 | 引擎版本 / embedding 维度隔离 | 无处安放 | 天然：一个 Cell = 一套版本 + 一个维度（维度冻结是引擎硬约束） |
 | 租户放置与迁移 | 中心调度自动；迁移只改一条记录 | 开通时运营决策；不均衡时 export/import 搬数据（排空窗口） |
 | 跨 Cell/库的联合分析 | 可单点 SQL | 逐 Cell 拉取聚合 |
@@ -169,7 +174,7 @@ flowchart TB
 
 ## 3. 客户数据：有哪些、怎么存、怎么映射到 PG
 
-### 3.1 数据全景（一个客户在系统里的全部数据，7 类）
+### 3.1 数据全景（一个客户在系统里的全部数据，8 类）
 
 | # | 数据类别 | 具体内容 | 存在哪 | 为什么存这 |
 |---|---|---|---|---|
@@ -183,6 +188,8 @@ flowchart TB
 | 8 | bank 配置与人格画像 | 每个 bank 的 disposition（怀疑度/字面度/共情等特质）、mission、三级配置覆盖 | 引擎库 `banks` 表（运行时真相）；目录与 ACL 真相在平台库 `bank_registry`（每日对账 + 变更钩子同步） | disposition 影响 reflect 行为——这是客户数据不是系统配置 |
 
 ### 3.2 租户数据在引擎库里的形态
+
+**先回答"schema 是谁的概念"**：PostgreSQL 的 schema 是数据库原生的命名空间（一个库内的表分组），不是本文发明的。**Hindsight 引擎原生使用它做租户隔离**——引擎的租户扩展合同就是"认证后返回一个 schema 名"（`core/extensions/tenant.py` 的 `TenantContext.schema_name`），所有 SQL 由 `fq_table()` 自动拼接 schema 前缀，迁移工具按 schema 逐个执行，admin CLI 有 `--schema` 参数。但"**一个租户 = 一个 schema**"这条映射规则是**部署方通过扩展自定义**的：官方 Supabase 扩展用 `user_<uuid>` 命名，static-keys 扩展用 `user_<id>`，本平台用 `t_<租户ID前12位hex>`。一句话：**机制（schema 隔离）是 Hindsight 引擎原生的；命名规则与租户粒度是平台自定义的。**
 
 租户甲（`tenant_id=3f2a91c0…`）开通后，引擎库（Cell-A 的 PG）里出现 schema `t_3f2a91c0d4e2`，含约 22 张表（权威清单 = `core/admin/cli.py:58-83`）：
 
@@ -212,6 +219,29 @@ t_3f2a91c0d4e2（租户甲的 schema）
 
 ### 3.3 引擎寻址：从请求到数据的完整链路（三步）
 
+先看一张请求信息的流转图——**请求带了什么、每一步凭它换到了什么**：
+
+~~~mermaid
+flowchart LR
+  subgraph WHAT["客户端请求里实际携带的信息"]
+    K["① Authorization: Bearer {API key}"]:::external
+    B["② URL 路径里的 bank 名<br/>/v1/{space}/memories/recall<br/>（产品 API 形态，转发时改写为引擎路由）"]:::external
+  end
+  K --> P1["平台鉴权服务<br/>用 key 哈希查平台库 api_keys<br/>→ 得到：tenant_id ＋ 允许的 bank 列表"]:::platform
+  P1 -->|"用 tenant_id 查"| P2["查注册表 tenant_schemas<br/>→ 得到：cell_id ＋ schema_name<br/>（schema 名仅供路由，不进断言）"]:::platform
+  P1 & P2 & B --> AS["生成签名断言（HMAC，≤60 秒有效）<br/>载荷：tenant_id / key_id / 允许的 bank<br/>（bank 名在此对照允许列表做 ACL 校验）"]:::platform
+  AS -->|"转发：断言放放行 header；<br/>Authorization 换成平台内部凭据"| ENG["引擎实例（L2 依 cell_id 转发到<br/>Cell-A 的 ELB，轮询落本实例）"]:::hs
+  ENG --> V["引擎验断言签名 → 查本地缓存<br/>（miss 时问平台）→ schema 名进请求上下文"]:::hs
+  V --> SQL["SQL 生成：<br/>SELECT … FROM #quot;t_3f2a…#quot;.memory_units<br/>WHERE bank_id = 'team-proj'"]:::hs
+  SQL --> PGDB[("引擎库 PG<br/>（部署时静态绑定——见下）")]:::commercial
+  classDef hs fill:#DBEAFE,stroke:#2563EB,color:#172554;
+  classDef platform fill:#FFEDD5,stroke:#C2410C,color:#7C2D12;
+  classDef commercial fill:#F3E8FF,stroke:#9333EA,color:#581C87;
+  classDef external fill:#F8FAFC,stroke:#64748B,color:#0F172A;
+~~~
+
+要点：**用户的 API key 不进引擎**——L2 转发时把 Authorization 替换为平台内部凭据，身份断言经放行 header 传入（引擎收到的 `RequestContext.api_key` 是内部凭据，不是用户 key；引擎另支持用户 key 直连模式，本方案关闭）；**bank 名是唯一进入 SQL 寻址谓词（`WHERE bank_id`）的客户信息**；schema 名是引擎收到请求后自己换来的（缓存或问平台）；PG 地址谁都不用查——部署时绑定。三步展开：
+
 ```text
 第一步：找到 PG     —— 不找。引擎部署（Cell）启动配置写死 DATABASE_URL，
                       绑定本 Cell 的引擎库。租户→Cell 由平台在开通时决定，
@@ -235,7 +265,24 @@ t_3f2a91c0d4e2（租户甲的 schema）
 | 后台维护（consolidation 对账、知识页 cron、清理） | 任务角色 | **两段式**：先由 public 例程从库里枚举候选 schema（如 `banks_needing_consolidation()`）→ 再用 `list_tenants()`（注册表缓存）过滤出 worker 会轮询的 schema → 生成任务行 |
 | 控制面操作（开通/迁移/回收/备份） | 平台控制器 | 直接读写平台库；对引擎库用 admin CLI **直连**（绕过 PgBouncer，advisory lock 需要）。注意：`import-bank` 会在 CLI 进程里拉起完整引擎（含迁移），不是纯直连 |
 
-### 3.4 来源账本与引擎侧原件的双存关系（替换协议的基础）
+### 3.4 PG 之外的数据清单与处理（调研结论，全部有代码位置）
+
+"数据都在 PG 里"只对了一半——引擎还有一批**存在 PG 之外**的数据，Serverless 部署必须逐项处理：
+
+| 数据 | 实际存哪 | 代码位置 | 处理方式 |
+|---|---|---|---|
+| 附件/上传文件 blob | **默认（native）就在 PG**：`file_storage` 表 BYTEA 列；s3/gcs/azure 模式则存对象存储 | `engine/storage/postgresql.py:61-131`；后端工厂 `storage/__init__.py:44-122` | 默认模式天然兼容 RDS；文件量大时切 `HINDSIGHT_API_FILE_STORAGE_TYPE=s3` 指向 OBS（键自带 bank 前缀） |
+| 文档/整库导出档案（transfer.zip） | file_storage（native 模式=PG 表） | 存入 `{bank前缀}exports/{uuid}/`，`memory_engine.py:2990-2996` | **无 TTL、只在删 bank 时清扫**——长期运行无限增长；切对象存储 + 生命周期规则 |
+| OAuth 凭据（codex/nous/xai 的 LLM 登录态） | **本地磁盘 JSON**：`~/.codex/auth.json` 等 + `.lock` 文件 | `providers/codex_auth.py:87-90`、`nous_auth.py:94-95`、`xai_oauth_auth.py:235-244`；跨进程锁 `oauth_store_lock.py:63-121` | **Serverless 档禁用这三类 Provider**（改 API key 型：deepseek/智谱/火山）。原因：刷新令牌是 rotating 且须写回本地文件；Nous 的刷新令牌单次有效且有服务端重用检测——**两个实例用同一旧令牌刷新会触发盗用信号、吊销整个会话**（`nous_auth.py:22-30`） |
+| 本地模型权重（embedding/rerank/llama.cpp） | HF 缓存目录、`~/.hindsight/models`（llama.cpp 约 3.5GB） | `embeddings.py:355-360`、`cross_encoder.py:147-174`、`llamacpp_llm.py:83-99` | 消除：全远程推理（§4.4）；官方 Docker 镜像本就排除 llama.cpp |
+| **pg0 嵌入式 PG 数据目录** | **实例本地磁盘** | 默认 `DATABASE_URL="pg0"`（`config.py:1084`），引擎静默起本地 PG（`memory_engine.py:5010-5028`） | **必须显式配置 RDS 地址**——否则所有"PG 数据"实际落在实例临时盘，实例回收即全部丢失，多实例各持一份互相不一致 |
+| MCP 会话（stateful 模式） | **进程内存** | `api/mcp.py:395-439`；默认 stateful（`config.py:1506`） | 显式 `HINDSIGHT_API_MCP_STATELESS=true`（§4.1 已列入验收） |
+| admin CLI 的 backup / export-bank 产物 | **操作者本地磁盘** zip | `admin/cli.py:375-393, 1220`；`import-bank` 在 CLI 进程拉起完整引擎（含迁移，`cli.py:1261-1283`） | 运维工具保留在跳板机/Job 容器跑（有本地盘）；运行时不用它 |
+| 可安全丢弃的临时数据 | 临时目录（markitdown 解析产物自清理、CLI provider 工作目录）、daemon 日志、多 worker 指标快照 | `parsers/markitdown.py:205-228` 等 | 无需处理（随进程生死） |
+
+**一句话**：native 文件模式和审计/追踪/webhook 队列本来就落在 PG（随 RDS 高可靠）；**必须消除的是 pg0 默认值、本地模型、OAuth 文件型 Provider、stateful MCP 四项**（前三项已在 Serverless 配置档中强制，第四项在 §4.1）；导出档案和 OBS 化文件是容量治理项。
+
+### 3.5 来源账本与引擎侧原件的双存关系（替换协议的基础）
 
 引擎库里其实有**第二份原件**：`documents.original_text` 存全文、attachments 的 blob（native 文件模式下存表内、s3 模式下存 OBS）。平台侧另有 sources 账本（平台库）+ OBS 原件对象。三者的分工与写入规则：
 
@@ -260,7 +307,7 @@ flowchart TB
     CA["只读缓存<br/>租户→schema（TTL 5min）<br/>bank 配置（TTL 30s）<br/>——丢了自动重建"]:::hs
     PO["DB 连接池<br/>连本 Cell 的 PgBouncer<br/>——断线重连即可"]:::hs
     SE["进程内并发闸<br/>限制单实例同时处理的请求数<br/>——总并发=单实例上限×实例数×每实例进程数"]:::hs
-    BG["后台循环（维护/指标刷新）<br/>——本方案以引擎补丁在请求角色关闭<br/>只在任务角色运行；幂等可续跑"]:::hs
+    BG["后台循环（维护/指标刷新）<br/>——本方案以配置关闭（维护任务间隔设 0<br/>即禁用，引擎原生开关，无需补丁）<br/>只在任务角色运行；幂等可续跑"]:::hs
   end
   OUT["✗ 不在实例上的东西（全在持久层）：<br/>异步任务 → 引擎库 async_operations 表<br/>记忆数据 → 引擎库租户 schema<br/>原件与账本 → OBS + 平台库<br/>配置真相 → env + banks.config 表<br/>会话状态 → 无（**注意：引擎默认开启 MCP 有状态会话，<br/>Serverless 配置档必须显式设 HINDSIGHT_API_MCP_STATELESS=true**，<br/>否则与 ELB 轮询不兼容）"]:::oss
   INST ==>|"进程被杀 = 框内全部蒸发，零数据损失"| REB["新实例自举：新请求自带上下文<br/>缓存 miss 查 L2 重建<br/>池重连"]:::platform
@@ -328,10 +375,10 @@ sequenceDiagram
   G->>P: 触发认证
   P->>P: 验 API key → 查注册表：租户在 Cell-A、schema=t_3f2a…
   P->>P: 配额检查（fail-close；超限直接拒）
-  P->>O: 归档原件（inline 文本也归档）+ 写 sources 账本行（产品模式；直通模式无此步，见 §3.4）
+  P->>O: 归档原件（inline 文本也归档）+ 写 sources 账本行（产品模式；直通模式无此步，见 §3.5）
   P->>E: 转发到 Cell-A 的 ELB + 注入签名断言 header
   E->>E: 验断言 → 注册表缓存取 schema → 请求上下文
-  E->>R: 受理：与业务写同一事务 INSERT 任务行（payload 含 _schema）
+  E->>R: 受理：与业务写同一事务 INSERT 任务行（payload 不含租户信息；认领时由 poller 注入 schema，§3.3）
   E-->>C: 202 + operation_id（任务已持久化，此后任何实例死了都不影响）
   Note over W: 请求角色与任务角色之间没有任何调用——从这行开始换演员
   W->>R: 每 500ms 轮询：SELECT … FOR UPDATE SKIP LOCKED（bank/文档串行化谓词）
@@ -341,7 +388,7 @@ sequenceDiagram
   end
   W->>R: 提交 consolidation 任务（水位标记）+ webhook 待发行（同事务）
   W->>R: consolidation 执行 → 生成观察/心智模型 → 刷新知识页
-  W-->>P: 完成事件（token 用量，经引擎事务性待发表）→ 计量入平台库
+  W-->>P: 完成事件（token 用量，经引擎完成钩子事件化上报；at-least-once，平台按事件 ID 幂等去重）
   W-->>C: webhook 通知（at-least-once）；C 也可轮询 operation 状态
 ~~~
 
@@ -462,7 +509,7 @@ flowchart LR
 
 ## 11. 实施阶段
 
-A 单 Cell 拆分（纯配置+2 个引擎小补丁）→ B 平台多租户（注册表/扩展/配额/开通）→ C 弹性可观测（采集器/AS/告警）→ D 产品模式与替换就绪（账本/绑定/影子演练）→ E 多 Cell 规模验证。每阶段验收门槛见 V2 评审版；新增：**阶段 A 增"杀实例演练"三项（4.3 表全过）**。
+A 单 Cell 拆分（纯配置即可——含维护循环关闭（间隔=0）；少量引擎侧改进：伸缩指标导出/跨 schema 回收 CLI/drop-schema 工具）→ B 平台多租户（注册表/扩展/配额/开通）→ C 弹性可观测（采集器/AS/告警）→ D 产品模式与替换就绪（账本/绑定/影子演练）→ E 多 Cell 规模验证。每阶段验收门槛见 V2 评审版；新增：**阶段 A 增"杀实例演练"三项（§4.3 表全过）**。
 
 ---
 
