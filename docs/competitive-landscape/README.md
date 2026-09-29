@@ -7,6 +7,7 @@
 - [03 RSI 深度调研：沉淀之后数据会怎样](03-rsi-memory-evolution-deep-dive.md) — L0–L5 演化分级框架、六产品触发器/执行者/守护逐家核查（含两处评级修正）、学界自进化算法菜单（Generative Agents/A-MEM/AWM/ExpeL/Mem-α 等）、RSI 六环闭环的算法落位
 - [04 Hindsight vs Cognee 数据流对比](04-dataflow-hindsight-vs-cognee.md) — 代码级逐阶段走读（v0.10.1 vs v1.6.0）：摄入/巩固/查询/后台四条路径的调用链与 file:line 锚点、流水线式智能 vs 写入式智能的结构差异、两侧"值得抄"机制清单与反直觉发现
 - [05 Cognee vs Hindsight 当前架构与实现对比](05-code-architecture-cognee-vs-hindsight.md) — 先分别介绍接入、数据模型、存储、检索与后台演进，再比较性能成本、事务、扩容、权限和扩展边界；包含对 04 若干结论的源码修订与同条件验证方案。当前实现判断优先参考本篇。
+- [06 Ladybug 瓶颈与 Cognee vs Hindsight 最终裁决](06-ladybug-bottlenecks-and-cognee-vs-hindsight-verdict.md) — Ladybug 三层瓶颈与规模红线（cognee 部署默认值 → 集成层串行 → 引擎单写，无权威规模实测）、两家基准分数独立复核（hindsight LongMemEval-S 94.6% 核到 run 文件级；同 harness 直接对比差 4.8~11.7 分，LongMemEval 无同榜对决）、六维架构对比与分场景裁决；3+2 子代理 1+1 审计，附录 B 列明被推翻的 6 处主张。
 
 ## 证据等级
 
