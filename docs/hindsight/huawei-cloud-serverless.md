@@ -6,16 +6,30 @@
 
 ## 0. 术语表（先读这一节，全文只用这些词）
 
+本文的"Serverless"指：**AS 弹性伸缩组自动增减 ECS 实例 + 最低实例数保底**——客户不管理服务器、计算按负载自动扩缩；不承诺计算空闲归零（存储与平台服务费用常在，§2）。
+
 | 术语 | 是什么 | 不是什么 |
 |---|---|---|
-| **Hindsight 引擎** | 一个软件包（`hindsight-api-slim`）。**同一个容器镜像、同一份代码**，按启动参数分成两种进程角色 | 不是一个"总控节点"，不是一套微服务 |
+| **Hindsight 引擎** | 一个软件包（`hindsight-api-slim`）。**同一个容器镜像、同一份代码**，按启动参数分成两种进程角色（官方文档口径为"三个服务"，第三个是调试用 UI，见 §0.1） | 不是一个"总控节点"，不是一套微服务 |
 | **引擎·请求角色**（`hindsight-api`） | 引擎的进程角色之一：接 HTTP/MCP 请求，执行 recall / reflect / 同步 retain / 受理异步任务。**ELB 对接的就是它——它就是引擎本身** | 不是独立于引擎的"API 网关"或"API 服务" |
 | **引擎·任务角色**（`hindsight-worker`） | 引擎的进程角色之二：跑异步任务（retain 的 LLM 流水线、consolidation、知识页刷新、webhook 投递） | 不是独立产品，与请求角色同镜像 |
-| **Cell** | 一套独立部署 = 一组引擎 ECS + **一个** RDS PG 实例（引擎库）+ 一套运行配置（引擎版本、embedding 模型与维度）。租户被放进某个 Cell | 不是 K8s 的 namespace 概念，是**数据+计算的放置单位** |
+| **Cell** | 一套独立部署 = 一组引擎 ECS + **一个** RDS PG 实例（引擎库）+ 一套运行配置（引擎版本、embedding 模型与维度）。租户被放进某个 Cell——**数据+计算的放置单位** | 不是负载均衡组；绑定后不可漂移，跨 Cell 迁移需搬数据 |
 | **引擎库** | Cell 里那个 RDS PG 实例。存放租户的记忆数据。**schema = 租户**（一租户一个 schema，每个 schema 约 22 张表），表内 `bank_id` 列再分业务区 | 不是"每个租户一个 PG 实例" |
 | **平台库** | 另一个独立 RDS PG 实例，存平台自己的元数据（租户注册表、API key、配额、计量、绑定） | 引擎不直连它（经 L2 的 HTTP） |
 | **注册表** | 平台库里的 `tenants` / `tenant_schemas` 表，回答"租户→哪个 Cell、哪个 schema" | 不是引擎的组件，引擎只经缓存读它 |
 | **bank** | 租户 schema 内的业务分区（一个项目/一个 agent 的记忆集合），就是表里 `WHERE bank_id=...` 的那个值 | 不是租户，不是 schema |
+
+### 0.1 两个引擎角色的官方定义（引自 `hindsight-docs/docs/developer/services.md`，非本文杜撰）
+
+官方文档把 Hindsight 描述为**三个服务**：API、Worker、Control Plane。前两个就是本文说的"引擎"（同一软件包、同一镜像、不同启动入口）；第三个是面向开发调试的 Web UI。
+
+| 服务 | 官方定义（译自原文） | 入口与端口 | 健康端点（官方） |
+|---|---|---|---|
+| **API 服务** | "核心记忆引擎，处理全部记忆操作：**Retain**（摄取内容、抽取事实、构建知识图）、**Recall**（跨记忆的语义检索）、**Reflect**（带 disposition 特质的回答生成）。**API 服务是无状态的，可在负载均衡器后水平扩展；全部状态存于 PostgreSQL。**默认 API 也在内部处理后台任务（心智模型整合）；高吞吐部署可禁用内部 worker 改跑专职 worker" | `hindsight-api`，默认端口 8888 | 与 worker 相同的三端点＋指标（出处：官方 monitoring.md）：`/health/live`（不查库）、`/health` 与 `/health/ready`（readiness，查库）、`/metrics` |
+| **Worker 服务** | "专职后台任务处理器。**与 API 服务使用同一个软件包和 Docker 镜像，只是入口不同**。worker 以 PostgreSQL 为任务 broker，轮询领取待处理任务；多个 worker 可同时运行而不冲突" | `hindsight-worker`，默认指标端口 8889 | `/health/live`（liveness，不查库）、`/health` 与 `/health/ready`（readiness，查库）、`/metrics` |
+| **Control Plane** | "管理/浏览记忆库的 Web UI：浏览 bank、查看实体与关系、摄取历史与操作、交互测试 recall。连接 API 服务，面向开发与调试" | 裸机可 `npx` 独立运行 | — |
+
+与本文架构的对应关系：**API 服务 = 引擎·请求角色**（ECS 伸缩组 + ELB 后水平扩展——官方原文就是 "stateless and can be horizontally scaled behind a load balancer"）；**Worker 服务 = 引擎·任务角色**（官方原文 "uses PostgreSQL as a task broker"——与本文 §5 描述的轮询领取机制完全一致）；**Control Plane 不部署**——它是单租户调试工具（数据面地址硬编码单实例，V1 调研已确认），多租户产品由平台自己的控制台替代。官方还给出 worker 缩容守则："缩容或移除 worker 前，用 `hindsight-admin decommission-worker <worker-id>` 释放其任务"——正常缩容由优雅排空覆盖该守则（§4.3），实例异常死亡由回收控制器（§8-F2）自动执行 decommission 等价操作。
 
 ---
 
@@ -277,7 +291,7 @@ flowchart LR
 | 本地模型权重（embedding/rerank/llama.cpp） | HF 缓存目录、`~/.hindsight/models`（llama.cpp 约 3.5GB） | `embeddings.py:355-360`、`cross_encoder.py:147-174`、`llamacpp_llm.py:83-99` | 消除：全远程推理（§4.4）；官方 Docker 镜像本就排除 llama.cpp |
 | **pg0 嵌入式 PG 数据目录** | **实例本地磁盘** | 默认 `DATABASE_URL="pg0"`（`config.py:1084`），引擎静默起本地 PG（`memory_engine.py:5010-5028`） | **必须显式配置 RDS 地址**——否则所有"PG 数据"实际落在实例临时盘，实例回收即全部丢失，多实例各持一份互相不一致 |
 | MCP 会话（stateful 模式） | **进程内存** | `api/mcp.py:395-439`；默认 stateful（`config.py:1506`） | 显式 `HINDSIGHT_API_MCP_STATELESS=true`（§4.1 已列入验收） |
-| admin CLI 的 backup / export-bank 产物 | **操作者本地磁盘** zip | `admin/cli.py:375-393, 1220`；`import-bank` 在 CLI 进程拉起完整引擎（含迁移，`cli.py:1261-1283`） | 运维工具保留在跳板机/Job 容器跑（有本地盘）；运行时不用它 |
+| admin CLI 的 backup / export-bank 产物 | **操作者本地磁盘** zip | `admin/cli.py:375-393, 1220`；`import-bank` 在 CLI 进程拉起完整引擎（含迁移，`cli.py:1261-1283`） | 运维工具保留在运维跳板机（常驻或按需拉起的一台 ECS，有本地盘）上跑；运行时不用它 |
 | 可安全丢弃的临时数据 | 临时目录（markitdown 解析产物自清理、CLI provider 工作目录）、daemon 日志、多 worker 指标快照 | `parsers/markitdown.py:205-228` 等 | 无需处理（随进程生死） |
 
 **一句话**：native 文件模式和审计/追踪/webhook 队列本来就落在 PG（随 RDS 高可靠）；**必须消除的是 pg0 默认值、本地模型、OAuth 文件型 Provider、stateful MCP 四项**（前三项已在 Serverless 配置档中强制，第四项在 §4.1）；导出档案和 OBS 化文件是容量治理项。
@@ -291,7 +305,7 @@ flowchart LR
 | 谁写账本 | **平台产品 API 在受理时**：先归档原件到 OBS（inline 文本也归档）→ 写 `sources` 账本行（含 content_hash 与删除标记）→ 才调引擎 retain |
 | 直通模式的窗口期 | 直通模式绕过产品 API，**没人写账本**——这段数据不在重放覆盖范围；切产品模式前用"引擎 documents × 账本差集"对账补录，或向客户声明截止点 |
 | 删除如何传播 | 账本行置 `status=deleted`；引擎侧 `delete_source` 把记忆行清掉、归档进 `invalidated_memory_units` 墓碑表——重放时两处都会被账本的删除标记挡住（防复活） |
-| 双存的一致性 | 引擎侧原件是**缓存性质**（可从 OBS 重建）；账本+OBS 是真相。周期对账 Job 比对三方（OBS 对象 × 账本 × 引擎 file_storage 引用），孤儿对象清理 |
+| 双存的一致性 | 引擎侧原件是**缓存性质**（可从 OBS 重建）；账本+OBS 是真相。周期对账任务（平台控制器定时发起）比对三方（OBS 对象 × 账本 × 引擎 file_storage 引用），孤儿对象清理 |
 
 ---
 
@@ -307,7 +321,7 @@ flowchart TB
     CA["只读缓存<br/>租户→schema（TTL 5min）<br/>bank 配置（TTL 30s）<br/>——丢了自动重建"]:::hs
     PO["DB 连接池<br/>连本 Cell 的 PgBouncer<br/>——断线重连即可"]:::hs
     SE["进程内并发闸<br/>限制单实例同时处理的请求数<br/>——总并发=单实例上限×实例数×每实例进程数"]:::hs
-    BG["后台循环（维护/指标刷新）<br/>——本方案以配置关闭（维护任务间隔设 0<br/>即禁用，引擎原生开关，无需补丁）<br/>只在任务角色运行；幂等可续跑"]:::hs
+    BG["后台循环与内置任务处理<br/>——本方案以配置关闭请求角色的两者：<br/>内置 worker 开关 WORKER_ENABLED=false<br/>（否则请求角色会抢领任务！）<br/>＋维护任务间隔设 0（原生开关）<br/>只在任务角色运行；幂等可续跑"]:::hs
   end
   OUT["✗ 不在实例上的东西（全在持久层）：<br/>异步任务 → 引擎库 async_operations 表<br/>记忆数据 → 引擎库租户 schema<br/>原件与账本 → OBS + 平台库<br/>配置真相 → env + banks.config 表<br/>会话状态 → 无（**注意：引擎默认开启 MCP 有状态会话，<br/>Serverless 配置档必须显式设 HINDSIGHT_API_MCP_STATELESS=true**，<br/>否则与 ELB 轮询不兼容）"]:::oss
   INST ==>|"进程被杀 = 框内全部蒸发，零数据损失"| REB["新实例自举：新请求自带上下文<br/>缓存 miss 查 L2 重建<br/>池重连"]:::platform
@@ -316,7 +330,7 @@ flowchart TB
   classDef platform fill:#FFEDD5,stroke:#C2410C,color:#7C2D12;
 ~~~
 
-任务角色实例的差别只有一处：它**执行中**的任务在引擎库的行上标记 `status=processing, worker_id=本实例ID`——这是**记账**不是持有：任何实例都能执行任何任务（只要行被重置为 pending）。详见 4.3。
+任务角色实例的差别只有一处：它**执行中**的任务在引擎库的行上标记 `status=processing, worker_id=本实例ID`——这是**记账**不是持有：任何实例都能执行任何任务（只要行被重置为 pending）。详见 §4.3。
 
 ### 4.2 请求生命周期（无会话亲和的证明）
 
@@ -424,7 +438,7 @@ flowchart LR
 ### 6.2 租户生命周期
 
 ```text
-开通：控制器在平台库建档 → Job 直连引擎库跑迁移（CREATE SCHEMA + 22 表
+开通：控制器在平台库建档 → 控制器（平台层 ECS 上）以 admin CLI 直连引擎库跑迁移（CREATE SCHEMA + 22 表
       + 向量/全文索引，advisory lock 防并发）→ 状态 active → 发 API key
 冻结：validator 全拒 + list_tenants 过滤（worker 停止领取该 schema）
       —— 已在执行的任务会跑完（无租约中断，需向客户声明排空窗口）
@@ -446,9 +460,14 @@ flowchart LR
 | 有效并行度 | lane 并发 × 实例数，上限 = 连接预算 | slots × 实例数；**同 bank 串行化谓词 = 单 bank 不因加实例变快**，并行度来自 bank/文档维度 |
 | 减实例 | ELB 摘除排空，零损失 | 优雅退出释放自己的行；异常死亡由回收控制器兜底 |
 
+**启动模板的三个必要配置**（纯 ECS 部署的机制细节，两角色各自一份模板）：
+① **user-data（cloud-init）**：安装容器运行时，按角色启动参数拉起容器——两角色同一镜像，请求角色起 `hindsight-api`，任务角色起 `hindsight-worker`，并把 **worker_id 用 ECS 实例 ID 写入环境变量**（从实例元数据服务获取，替代默认的 hostname）；
+② **关机信号链**：systemd/docker 的停止超时设 ≥35 秒，保证 AS 缩容的关机信号能传到容器、完成引擎的 30 秒排空（不配置则缩容等于异常死亡，走回收控制器兜底）；
+③ **健康探针选型**：ELB 对请求角色用 readiness（`/health`，8888）；任务角色如需探针用 8889 的 `/health/live`（不查库——避免数据库故障时把 worker 误杀）。注意 `/health` 是查库的：引擎库故障期间请求角色会被 ELB 全量摘除（503 由 ELB 返回，客户端 SDK 重试仍然适用，§8-F4）。
+
 ### 7.2 存储怎么扩（两个方向）
 
-**方向一：Cell 内扩容（纵向 + 读扩展）**——升配 RDS 规格（连接数/IO/内存）；加只读副本（只服务分析负载，见 5.2 的一致性约束）。适用于"这个 Cell 的租户变多了但还没到分片阈值"。
+**方向一：Cell 内扩容（纵向 + 读扩展）**——升配 RDS 规格（连接数/IO/内存）；加只读副本（只服务分析负载，见 §5.2 的一致性约束）。适用于"这个 Cell 的租户变多了但还没到分片阈值"。
 
 **方向二：加 Cell（水平分片）**——触发阈值不只看活跃 bank 数，还要看**向量索引总数（活跃 bank × 3 + 全局，§3.2）**与 schema 数（万级索引带来内存碎片与清理压力）；开新 Cell 后新租户放入，存量租户用迁移流程搬。Cell 内缓解参数：索引按行数阈值惰性创建。**Cell 是本架构的分片单位**：每个 Cell 有独立的故障域、版本、embedding 维度、连接预算。这就是方案 B 的扩展模型（§2）。另注意**同 bank 串行化只作用于 retain/consolidation 类任务（recall 不串行）**——单一大 bank 是任务角色的扩展上限，疏导手段是把大 bank 拆成多个。
 
@@ -458,7 +477,7 @@ flowchart LR
 两条预算线（分开算，任何一条不满足都会翻车）：
 ① RDS 侧（服务端连接数）：
    PgBouncer 后端池 (default_pool_size × 2 台)
-   + 直连（迁移 Job ≤4 + 索引维护 ≤3 + 控制器 ≤2）
+   + 直连（并发迁移进程 ≤4 + 索引维护 ≤3 + 控制器 ≤2）
    ≤ RDS max_connections × 0.8        例：80×2 + 9 = 169 → RDS 按 ≥256 规划
 ② PgBouncer 客户端侧（引擎连代理的连接数）：
    请求角色实例数 × 每实例引擎池上限（引擎默认 100，必须显式调低，如 20）
@@ -486,13 +505,13 @@ flowchart LR
 | F8 | LLM 限流/凭据失效 | 变慢/持续失败 | 退避重试 / 告警人工 | 随因 |
 | F9 | OBS 故障 | 文件上传失败即拒绝（不留半态） | — | 随云 |
 | F10 | 误发版本 | 新实例异常 | 镜像回滚随时可做；schema 回退仅限可逆版本（数据迁移的 downgrade 多为故意空操作）——发布用 expand-contract 契约 | 按流程 |
-| F11 | 平台控制器故障 | 开通/回收停摆 | 双实例 + 幂等 Job | 分钟级 |
+| F11 | 平台控制器故障 | 开通/回收停摆 | 双实例 + 操作幂等可重跑 | 分钟级 |
 | F12 | 指标采集器故障 | 伸缩失明且无人发现 | 双活 + **指标断流告警**（监控的监控） | 分钟级 |
-| F13 | 开通 Job 卡死 | 悬挂 | lease 超时幂等重跑 | 巡检周期 |
+| F13 | 开通流程卡死 | 悬挂 | lease 超时幂等重跑 | 巡检周期 |
 | F14 | RDS 磁盘满 | 写全失败 | CES 磁盘告警（须配置）→ 扩容 | — |
 | F15 | webhook 持续失败 | 超限进死信仅引擎日志 | 平台死信告警 + 重放工具 | — |
 
-数据保障：引擎库/平台库各自 HA + PITR；**三个对账 Job**（注册表×引擎 schema、OBS 孤儿、bank 镜像）；队列 at-least-once + content_hash 幂等；**at-least-once 的代价明示**：重复 LLM 调用的费用由平台吸收不转嫁租户（计量按事件幂等去重）。
+数据保障：引擎库/平台库各自 HA + PITR；**三个对账任务（平台控制器定时发起）**（注册表×引擎 schema、OBS 孤儿、bank 镜像）；队列 at-least-once + content_hash 幂等；**at-least-once 的代价明示**：重复 LLM 调用的费用由平台吸收不转嫁租户（计量按事件幂等去重）。
 
 ---
 
@@ -509,7 +528,7 @@ flowchart LR
 
 ## 11. 实施阶段
 
-A 单 Cell 拆分（纯配置即可——含维护循环关闭（间隔=0）；少量引擎侧改进：伸缩指标导出/跨 schema 回收 CLI/drop-schema 工具）→ B 平台多租户（注册表/扩展/配额/开通）→ C 弹性可观测（采集器/AS/告警）→ D 产品模式与替换就绪（账本/绑定/影子演练）→ E 多 Cell 规模验证。每阶段验收门槛见 V2 评审版；新增：**阶段 A 增"杀实例演练"三项（§4.3 表全过）**。
+A 单 Cell 拆分（纯配置即可——含关闭请求角色的内置任务处理（`HINDSIGHT_API_WORKER_ENABLED=false`）与维护循环（间隔=0）；少量引擎侧改进：伸缩指标导出/跨 schema 回收 CLI/drop-schema 工具）→ B 平台多租户（注册表/扩展/配额/开通）→ C 弹性可观测（采集器/AS/告警）→ D 产品模式与替换就绪（账本/绑定/影子演练）→ E 多 Cell 规模验证。每阶段验收门槛见 V2 评审版；新增：**阶段 A 增"杀实例演练"三项（§4.3 表全过）**。
 
 ---
 
