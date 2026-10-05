@@ -1,0 +1,10 @@
+{
+  // Cloudflare Workers Builds 配置：纯静态资产站点（无脚本）
+  // 资产目录 = 本系列 HTML 阅读器（index.html 由 build.py 生成后入库）
+  "name": "hindsight-study",
+  "compatibility_date": "2026-10-05",
+  "assets": {
+    "directory": "./docs/hindsight/source-study",
+    "html_handling": "auto-trailing-slash"
+  }
+}
