@@ -1,9 +1,9 @@
 # 04 · Reflect 与 Consolidation —— 从"能背出记忆"到"能形成认知"
 
-> 代码基线:`f7dd3f4fd`(v0.10.2,2026-10-03);本篇已随 0.10.2 全量更新(原基线 `12f2d54f6`)。
+> 代码基线:`5b8356bb2`(v0.10.2,2026-10-05);本篇已随 0.10.2 全量更新(原基线 `12f2d54f6`;增量窗口 `f7dd3f4fd` → `5b8356bb2`,覆盖 #5246/#5236/#5249/#4897/#5247/#4999 六个 reflect/consolidation 修复及行号漂移)。
 
 > 研究对象:Hindsight 仓库 `hindsight-api-slim/hindsight_api/engine/` 下的 `reflect/`、`consolidation/`、`directives/`、`mental_model_refresh.py`、`graph_maintenance.py`、`maintenance.py`,以及 `memory_engine.py` 中对应的编排逻辑。
-> 本文所有论断均以基线 commit `f7dd3f4fd` 代码为准,标注 `相对路径:行号`;无法从代码确认的地方明确写"未确认"。
+> 本文所有论断均以基线 commit `5b8356bb2` 代码为准,标注 `相对路径:行号`;无法从代码确认的地方明确写"未确认"。
 
 ---
 
@@ -60,7 +60,7 @@ NOTE: Observations are distinct from mental models (pinned reflections).
 - `memory_units` 里的 **observation** = 自动合成的中间层知识;
 - `mental_models` 表 = 存 reflect 回答的"文档页"(旧名 reflections,refresh 时内容重写);
 - `engine/reflect/observations.py` 里那个带 `ObservationEvidence`/`quote`/`Trend` 的 `Observation` 模型是**上一代设计的残留**——在 engine/ 与 api/ 目录里 grep 不到任何包外消费者(`reflect/models.py:12-46` 的 `ObservationSection`/`ReflectAction`,经 `reflect/__init__.py:20` 再 re-export `ReflectAction`/`ReflectActionBatch`,但整个 ReflectAction/ObservationSection 集群在包内没有其他消费者),现在的 observation 数据模型是 `engine/response_models.py` 的 `MemoryFact`(经 consolidator 写入)。此为代码检索结论:"当前主链路未使用"。
-- 考古细节补遗(承接上表):全表 `fact_type` CHECK 现为三值 `('world','experience','observation')`——历史值 `opinion` 由迁移 `g2h3i4j5k6l7_remove_opinion_fact_type.py:34-51` 删除行并收紧(Oracle 基线同为三值,`o1a2b3c4d5e6_oracle_baseline.py:133`);`reflect_response.based_on` 至今保留 "opinion" 空键,只是历史兼容占位(`memory_engine.py:15497`、`retractions.py:36-44`)。
+- 考古细节补遗(承接上表):全表 `fact_type` CHECK 现为三值 `('world','experience','observation')`——历史值 `opinion` 由迁移 `g2h3i4j5k6l7_remove_opinion_fact_type.py:34-51` 删除行并收紧(Oracle 基线同为三值,`o1a2b3c4d5e6_oracle_baseline.py:133`);`reflect_response.based_on` 至今保留 "opinion" 空键,只是历史兼容占位(`memory_engine.py:15523`、`retractions.py:36-44`)。
 
 ## 1.3 为什么说这是 Hindsight 区别于普通 RAG 的核心
 
@@ -77,7 +77,7 @@ NOTE: Observations are distinct from mental models (pinned reflections).
 
 ## 2.1 Reflect:ReAct 式工具调用循环
 
-**必答问题 1 的答案**:reflect 有完整的 ReAct 式多轮工具循环。输入是 `query`(+可选 `context`、tags、`response_schema`);LLM 通过 OpenAI 格式的 native tool calling 被反复调用;输出是 `ReflectAgentResult`(答案文本 + 可选结构化文档 + 引用 ID + 完整 tool/LLM trace)。它**不写任何东西**——`reflect_async` 的 docstring 明确 "Reflect is read-only: it synthesizes an answer from the bank's stored memories and persists nothing."(`memory_engine.py:15076-15077`)。
+**必答问题 1 的答案**:reflect 有完整的 ReAct 式多轮工具循环。输入是 `query`(+可选 `context`、tags、`response_schema`);LLM 通过 OpenAI 格式的 native tool calling 被反复调用;输出是 `ReflectAgentResult`(答案文本 + 可选结构化文档 + 引用 ID + 完整 tool/LLM trace)。它**不写任何东西**——`reflect_async` 的 docstring 明确 "Reflect is read-only: it synthesizes an answer from the bank's stored memories and persists nothing."(`memory_engine.py:15102-15103`)。
 
 ### 主时序图
 
@@ -116,7 +116,7 @@ sequenceDiagram
 
 ### 循环骨架
 
-入口 `run_reflect_agent`(`agent.py:516`)在外层包了一层,专门负责创建与清理本次 reflect 用到的提示缓存;真正的循环在 `_run_reflect_agent_inner`(`agent.py:575`)。默认最多迭代 `DEFAULT_MAX_ITERATIONS = 10`(`agent.py:149`),并按 budget(请求参数,控制检索深度的档位)放缩:low=0.5x、mid=1x、high=2x(`memory_engine.py:15182-15185`)。
+入口 `run_reflect_agent`(`agent.py:524`)在外层包了一层,专门负责创建与清理本次 reflect 用到的提示缓存;真正的循环在 `_run_reflect_agent_inner`(`agent.py:583`)。默认最多迭代 `DEFAULT_MAX_ITERATIONS = 10`(`agent.py:150`),并按 budget(请求参数,控制检索深度的档位)放缩:low=0.5x、mid=1x、high=2x(`memory_engine.py:15208-15211`)。
 
 每一轮的关键决策——**强制分层检索**:
 
@@ -129,21 +129,21 @@ sequenceDiagram
         if include_recall:
             forced_sequence.append("recall")
 
-        if stop_forcing_from_iteration is not None and iteration >= stop_forcing_from_iteration:
-            # A fresh mental model already short-circuited the forced path.
-            iter_tool_choice = LLM_TOOL_CHOICE_AUTO
-        elif iteration < len(forced_sequence):
-            iter_tool_choice = LLMToolChoice.named(forced_sequence[iteration])
+        # A fresh mental model releases the remaining forced steps.
+        forced_step_pending = not forcing_released and forced_steps_done < len(forced_sequence)
+        if forced_step_pending:
+            iter_tool_choice = LLMToolChoice.named(forced_sequence[forced_steps_done])
         else:
             iter_tool_choice = LLM_TOOL_CHOICE_AUTO
 ```
-(`agent.py:1121-1135`)
+(`agent.py:1201-1213`)
 
 逐点讲解:
-- 前几轮 `tool_choice` 被**点名强制**:bank 有 mental models 就先强制查它,有 observations 就再强制查它,最后强制 `recall`——保证 agent 不会跳过任何一层知识就作答。工具清单本身按配置裁剪(`get_reflect_tools`,`agent.py:666-674`),prompt 里的检索策略段落与实际工具一一对应,避免弱模型幻觉出不存在的工具(`prompts.py:316-319` 注释、#1724)。0.10.2 起 system prompt 还在强制层之上写了一段显式的 "## Search Plan"(逐层下降、新鲜即停、证据到了就 `done`),让模型在强制放开后仍然跟着梯子走(`prompts.py:406-427`)。mental models 这一层还拆成了**搜索 + 阅读**两个工具:`search_mental_models` 只返回最匹配的一页全文 + 其余命中的 snippet,`read_mental_models` 按需把选中的页读全(默认 6000 token 预算,`tools_schema.py:113-143`、`agent.py:71-76`;五页全文曾测得 8.7-19k token 并在后续每轮重发,`tools.py:274-278` 注释;#4716)。
-- `stop_forcing_from_iteration` 是一个确定性短路:强制查出的 mental models 若全部"新鲜可用"(stale 指"上次刷新后 scope 内又进了新事实",见 3.4;这里还要求非空——`_all_mental_models_are_usable_and_fresh` 的两个条件是 `is_stale is False` 与 snippet/content 非空——搜索命中带 snippet、整页阅读带 content,二者任一即可,`agent.py:455-473`),就提前放开 `auto`,让模型自己决定要不要继续深挖(`agent.py:1467-1485`,判定函数在 `agent.py:455`)。注意该短路**仅在 low/mid budget 生效**:`agent.py:1477` 的 `(budget or "low").lower() != "high"` 门让 high 恒走完整强制链。
-- 到达最后一轮(`is_last`)或模型停在纯文本轮次时,走统一的 `_finish` 收尾:先在**同一个对话里**追加一轮 `tool_choice=done` 的调用(`_ask_for_done`,trace scope `closing_done`,复用 provider 已持有的前缀),成功就按 done 处理;provider 产不出调用再回退 `_forced_final_synthesis` 独立合成(`agent.py:879-959`)。实测只有约 29% 的刷新会自己调 `done`,旧版对 prose 停止直接重渲染全部工具结果开新 prompt,整份证据按全价重付一遍——收尾改走原对话是 #4656 实测 -26%~-43% per refresh 的主要来源之一。
-- 工具参数有硬边界:`_TOOL_ARG_MIN_TOKENS=1000`、`_TOOL_ARG_MAX_TOKENS=16000`(`agent.py:63-64`),且单批工具调用的总预算按"剩余上下文 / 并行数"分摊(`_resolve_tool_arg_ceiling`,`agent.py:100-114`),防止一次批量拉取把上下文撑爆、触发慢速的 split-synthesis(#4239)。
+- 前几轮 `tool_choice` 被**点名强制**:bank 有 mental models 就先强制查它,有 observations 就再强制查它,最后强制 `recall`——保证 agent 不会跳过任何一层知识就作答。工具清单本身按配置裁剪(`get_reflect_tools`,`agent.py:674-682`),prompt 里的检索策略段落与实际工具一一对应,避免弱模型幻觉出不存在的工具(`prompts.py:316-319` 注释、#1724)。0.10.2 起 system prompt 还在强制层之上写了一段显式的 "## Search Plan"(逐层下降、新鲜即停、证据到了就 `done`),让模型在强制放开后仍然跟着梯子走(`prompts.py:406-427`)。mental models 这一层还拆成了**搜索 + 阅读**两个工具:`search_mental_models` 只返回最匹配的一页全文 + 其余命中的 snippet,`read_mental_models` 按需把选中的页读全(默认 6000 token 预算,`tools_schema.py:113-143`、`agent.py:72-77`;五页全文曾测得 8.7-19k token 并在后续每轮重发,`tools.py:274-278` 注释;#4716)。
+- `forcing_released` + `forced_steps_done` 是一对确定性短路状态(0.10.2 线内 #5236 重构):强制查出的 mental models 若全部"新鲜可用"(stale 指"上次刷新后 scope 内又进了新事实",见 3.4;这里还要求非空——`_all_mental_models_are_usable_and_fresh` 的两个条件是 `is_stale is False` 与 snippet/content 非空——搜索命中带 snippet、整页阅读带 content,二者任一即可,`agent.py:463-481`),就把 `forcing_released` 置真、提前放开 `auto`,让模型自己决定要不要继续深挖(`agent.py:1579-1590`,判定函数在 `agent.py:463`)。注意该短路**仅在 low/mid budget 生效**:`agent.py:1583` 的 `(budget or "low").lower() != "high"` 门让 high 恒走完整强制链。与旧版的关键差异在**步进索引**:旧版强制步按迭代轮数索引(`stop_forcing_from_iteration`),一轮报错或返回空回复也会滑到下一步、被跳过的那层从此不再执行(#4564);现在按"已产出 tool call 的强制步数"索引,出错/空回复的那一轮会**原步重问**。
+- **强制步空回复的重试**(#5236):被点名的检索步返回了空回复(无 tool call)时,第一次**重试同一步**(`forced_empty_retry_used` 单发保险,`agent.py:1339-1353`),再空则记 warning"answering without it"并按合法停止进入收尾——单次空回复不再能静默丢掉一层检索。
+- 到达最后一轮(`is_last`)或模型停在纯文本轮次时,走统一的 `_finish` 收尾:先在**同一个对话里**追加一轮 `tool_choice=done` 的调用(`_ask_for_done`,trace scope `closing_done`,复用 provider 已持有的前缀),成功就按 done 处理;provider 产不出调用再回退 `_forced_final_synthesis` 独立合成(`agent.py:919-1025`)。实测只有约 29% 的刷新会自己调 `done`,旧版对 prose 停止直接重渲染全部工具结果开新 prompt,整份证据按全价重付一遍——收尾改走原对话是 #4656 实测 -26%~-43% per refresh 的主要来源之一。
+- 工具参数有硬边界:`_TOOL_ARG_MIN_TOKENS=1000`、`_TOOL_ARG_MAX_TOKENS=16000`(`agent.py:64-65`),且单批工具调用的总预算按"剩余上下文 / 并行数"分摊(`_resolve_tool_arg_ceiling`,`agent.py:101-115`),防止一次批量拉取把上下文撑爆、触发慢速的 split-synthesis(#4239)。
 
 **done 守卫与并行工具**。检测到 `done` 调用时,先检查"是否已收集到证据":
 
@@ -170,14 +170,16 @@ sequenceDiagram
                 )
                 continue
 ```
-(`agent.py:1276-1307`,节选)
+(`agent.py:1368-1396`,节选)
 
 - 什么都没查就想交卷 → 先把 done 调用本身连同一条去重后的 wire id 写回 messages,再伪造一条 tool error 打回去继续查(该分支会循环,所以 tool_use 也要进同一份请求历史)。这直接堵死"零检索幻觉作答"。
-- 其余工具调用并行执行:`asyncio.gather(*tool_tasks)`(`agent.py:1411-1427`),结果按**模型给出的原始顺序**回填进 messages(Anthropic 要求 tool_result 与 tool_use 顺序一致;槽位按 position 而非 tool_call_id 索引,防御返回重复/空 id 的网关,`agent.py:1369-1378` 注释;wire id 由 `_unique_tool_call_ids` 全循环去重,`agent.py:1080-1086`)。
-- 工具抛异常 ≠ 返回 error JSON:前者是基础设施故障,整个 run 失败(`ReflectToolExecutionError`,`agent.py:198-217`,#2894)——否则 agent 会"用不完整的证据自信作答",下游分不清"空 bank"和"坏了的 bank"。
-- 幻觉出的、不在 `enabled_tools` 集合里的工具名,返回结构化 error 让模型自己改(`agent.py:1335-1385`),而不是崩溃。
+- 其余工具调用并行执行:`asyncio.gather(*tool_tasks)`(`agent.py:1517-1533`),结果按**模型给出的原始顺序**回填进 messages(Anthropic 要求 tool_result 与 tool_use 顺序一致;槽位按 position 而非 tool_call_id 索引,防御返回重复/空 id 的网关,`agent.py:1475-1484` 注释;wire id 由 `_unique_tool_call_ids` 全循环去重,`agent.py:1152-1160`)。
+- 工具抛异常 ≠ 返回 error JSON:前者是基础设施故障,整个 run 失败(`ReflectToolExecutionError`,`agent.py:206-225`,#2894)——否则 agent 会"用不完整的证据自信作答",下游分不清"空 bank"和"坏了的 bank"。
+- 幻觉出的、不在 `enabled_tools` 集合里的工具名,返回结构化 error 让模型自己改(`agent.py:1444-1491`),而不是崩溃。
 
-**工具结果为"模型"而写,presentation 层(#4656)**。检索工具返回的原始 JSON 仍进 API trace,但写入 messages 前先经 `ToolResultPresenter`(`reflect/presentation.py:50-149`)重写:`f1`/`o1`/`p1`/`c1` 短别名替代 36 位 UUID;时间戳压到分钟(时间是证据——supersession 靠它裁决——所以只缩短、不删除);常量 `fact_type`、重复的 `occurred_end`、chunk 簿记字段删除;早前轮次已展示过的条目在 `already_shown` 下只列别名。模型在 `done`/`expand` 里写回的别名在进入任何下游(工具执行、引用校验、based_on)之前经 `presenter.resolve` 还原为真实 id(`agent.py:1318, 1414, 944`)——实测合成 prompt 里事实文本只占五分之一,其余都是这些"框子",且每一轮循环都重发一遍。
+**工具结果为"模型"而写,presentation 层(#4656)**。检索工具返回的原始 JSON 仍进 API trace,但写入 messages 前先经 `ToolResultPresenter`(`reflect/presentation.py:53-179`)重写:`f1`/`o1`/`p1`/`c1` 短别名替代 36 位 UUID;时间戳压到分钟(时间是证据——supersession 靠它裁决——所以只缩短、不删除);常量 `fact_type`、重复的 `occurred_end`、chunk 簿记字段删除;早前轮次已展示过的条目在 `already_shown` 下只列别名。模型在 `done`/`expand` 里写回的别名在进入任何下游(工具执行、引用校验、based_on)之前经 `presenter.resolve` 还原为真实 id(`agent.py:1408, 1520, 999`)——0.10.2 线内 #5246/#4876 把还原范围扩到了**正文本身**:`resolve` 对 `done` 参数里的 `answer` 与 `document` 两个键改走 `_resolve_prose`,用 `_ALIAS_IN_TEXT_RE` 把自由文本与结构化文档每一层字符串里的别名 token 逐个换回真实 id(只换本次 reflect 真发过的别名,`presentation.py:84-111`);强制合成的答案也在长度预算处理前过一遍 `presenter.resolve_text`(`agent.py:1095-1096`)。动机写在模块头:别名只在这一次 reflect 内有意义,"none may reach the caller or a stored mental model"——此前答案/文档正文里写下的 `f2`/`o1` 会原样存进 mental model 内容与 `based_on` 之外的一切读者眼前,变成无法解析的死引用。实测合成 prompt 里事实文本只占五分之一,其余都是这些"框子",且每一轮循环都重发一遍。
+
+**done 文档形状拒收(#5249/#4910,0.10.2 线内)**。`done` 的 `document` 参数经 `document_from_sections` 归一化,但**类型违规不再被猜**:sections 不是数组、section 不是对象、blocks 不是数组、block 不是字符串——逐字段收集错误、一次性抛 `DocumentSectionsInvalidError`(`reflect/structured_doc.py:324-341, 343-408`),而不是像旧版那样把非字符串 block `str()` 成 Python repr 塞进 `mental_models.content`(#4910 的字面 `{'text': '...'}` 事故)。agent 侧把错误回喂给模型重交(`_MAX_DOCUMENT_REJECTIONS = 1`,`agent.py:152-157`):主循环里拒绝消息(被拒的 done 调用 + 逐字段错误 + required shape)追加进同一对话(`agent.py:1424-1441`),收尾路径经 `_ask_for_done(feedback)` 在原前缀上重问(经拒后 provider 产不出调用就**直接失败**、绝不落到独立 prose 合成——那等于把被拒文档读回成自由文本,`agent.py:987-1025`);长度改写同样只收文档、拒绝时重问一次,仍不达就保留原文档上报超预算(`_document_from_rewrite` 不再回退 `split_markdown`,`agent.py:1718-1750, 1776-1893`)。重试额度用尽,run 响亮失败而不是存一份没人能信的文档。
 
 **收尾:ID 校验**。`done` 的参数里,正文与引用分开;只有"真的被工具返回过"的 ID 才会被接受:
 
@@ -187,22 +189,22 @@ sequenceDiagram
     used_mental_model_ids = [mid for mid in (args.get("mental_model_ids") or []) if mid in available_mental_model_ids]
     used_observation_ids = [oid for oid in (args.get("observation_ids") or []) if oid in available_observation_ids]
 ```
-(`agent.py:1802-1805`)
+(`agent.py:1976-1979`)
 
-`available_*_ids` 三个集合在每次工具结果落地时从**原始输出**(未经 presentation)增量填充(`agent.py:1458-1503`)。模型引了一条没见过的 ID → 静默剔除,引用永远可校验。
+`available_*_ids` 三个集合在每次工具结果落地时从**原始输出**(未经 presentation)增量填充(`agent.py:1564-1609`)。模型引了一条没见过的 ID → 静默剔除,引用永远可校验。
 
-**超预算兜底:map-reduce 强制合成**。上下文预算(默认 `max_context_tokens=100_000`)在每轮之间检查——每轮的 token 估算走 `_count_messages_tokens`(`agent.py:1103`,底层是 `reflect/tokenization.py` 的 `count_prompt_tokens`,按配置编码对文本计数)——超了或到达最后一轮就触发收尾。强制合成 `_forced_final_synthesis`(`agent.py:961-1072`)分两种装法:证据装得下就一次调用;装不下就 `split_context_history` 按预算切块(**切分而非截断**,超预算单块沿 `observations/memories/results` 数组边界再切,而 recall 结果里那个比半份预算还大的兄弟块——通常是原始 `chunks`——会单独成块打包,不再被拷进每一个分片,#4495;`prompts.py:591-597, 762-778`),每块并行做"claim 提取"(map,温度强制 0,`agent.py:161-166`),最后一次 reduce 合成——旧版"整块丢弃"会导致引用几百条却什么都没读到的自信"没有信息"回答(#3122)。
+**超预算兜底:map-reduce 强制合成**。上下文预算(默认 `max_context_tokens=100_000`)在每轮之间检查——每轮的 token 估算走 `_count_messages_tokens`(`agent.py:1182`,底层是 `reflect/tokenization.py` 的 `count_prompt_tokens`,按配置编码对文本计数)——超了或到达最后一轮就触发收尾。强制合成 `_forced_final_synthesis`(`agent.py:1027-1140`)分两种装法:证据装得下就一次调用;装不下就 `split_context_history` 按预算切块(**切分而非截断**,超预算单块沿 `observations/memories/results` 数组边界再切,而 recall 结果里那个比半份预算还大的兄弟块——通常是原始 `chunks`——会单独成块打包,不再被拷进每一个分片,#4495;`prompts.py:591-597, 762-778`),每块并行做"claim 提取"(map,温度强制 0,`agent.py:169-174`),最后一次 reduce 合成——旧版"整块丢弃"会导致引用几百条却什么都没读到的自信"没有信息"回答(#3122)。
 
 **错误处理备忘**:
-- 从未产出过可解析的 tool call(`saw_tool_call=False`)→ `ReflectToolCallError`,提示换支持函数调用的模型/传输(`agent.py:182-196`,raise 在 1249-1266)——不"打捞"自由文本,因为那可能是被截断的 done JSON。
-- 不走 `_finish` 的两条超预算路径,都直接进强制合成:其一,轮间**主动预算检查**发现累计消息已超限——注释写明 "Not ``_finish``: asking for ``done`` appends to a conversation that is already over the budget"(`agent.py:1111-1113`);其二,调用抛出**上下文溢出异常**——不重试,带已有证据直落强制合成,注释 "Context overflow errors must never be retried"(`agent.py:1215-1224`)。两条路共同的理由:对话本身已超预算,再追加一轮 done 追问只会更糟,独立 synthesis prompt 还会把证据切块分摊。
-- 模型停在没有工具调用的轮次但之前调用过工具 → 视为合法停止,统一经 `_finish` 收尾(先原对话追问 done,失败回退强制合成,`agent.py:1267-1268`)。
+- 从未产出过可解析的 tool call(`saw_tool_call=False`)→ `ReflectToolCallError`,提示换支持函数调用的模型/传输(`agent.py:190-204`,raise 在 1321-1338)——不"打捞"自由文本,因为那可能是被截断的 done JSON。
+- 不走 `_finish` 的两条超预算路径,都直接进强制合成:其一,轮间**主动预算检查**发现累计消息已超限——注释写明 "Not ``_finish``: asking for ``done`` appends to a conversation that is already over the budget"(`agent.py:1189-1191`);其二,调用抛出**上下文溢出异常**——不重试,带已有证据直落强制合成,注释 "Context overflow errors must never be retried"(`agent.py:1285-1296`)。两条路共同的理由:对话本身已超预算,再追加一轮 done 追问只会更糟,独立 synthesis prompt 还会把证据切块分摊。
+- 模型停在没有工具调用的轮次但之前调用过工具 → 视为合法停止,统一经 `_finish` 收尾(先原对话追问 done,失败回退强制合成,`agent.py:1354-1355`)。
 
 ### 输出结构
 
 `ReflectAgentResult`(`reflect/models.py:138-176`):`text`(正文)、`document`(answer_as_document 模式下的结构化文档)、`structured_output`(给了 `response_schema` 时另行一次抽取调用)、`iterations`、`tools_called`、`tool_trace`(每次工具调用的 input/output/耗时/轮次)、`llm_trace`(scope 如 `agent_1`/`closing_done`/`final`/`final_map_0`)、`usage`(含 cached/thoughts tokens)、`used_memory_ids`/`used_mental_model_ids`/`used_observation_ids`、`directives_applied`。
 
-memory_engine 随后把 trace 里的证据按 `used_*_ids` 过滤,组装成 `based_on` 字典(`memory_engine.py:15484-15541`),键为:
+memory_engine 随后把 trace 里的证据按 `used_*_ids` 过滤,组装成 `based_on` 字典(`memory_engine.py:15510-15567`),键为:
 
 ```python
             based_on: dict[str, list[Any]] = {
@@ -214,7 +216,7 @@ memory_engine 随后把 trace 里的证据按 `used_*_ids` 过滤,组装成 `bas
                 "directives": [],
             }
 ```
-(`memory_engine.py:15494-15501`)
+(`memory_engine.py:15520-15527`)
 
 这个 `based_on` 平时随响应返回;mental model 刷新时会被序列化存进 `mental_models.reflect_response`,成为后续 retraction 审计的账本(3.3)。
 
@@ -234,9 +236,9 @@ memory_engine 随后把 trace 里的证据按 `used_*_ids` 过滤,组装成 `bas
 (`memory_engine.py:6828-6833`)
 
 2. **定时补偿**:维护循环(默认每 5 分钟)跑 "consolidation reconcile",扫 `banks_needing_consolidation()` 例程,给"有未调度事实且没有在途 consolidation"的 bank 重新投递——兜住上次 consolidation 终态失败后卡在 `consolidated_at IS NULL AND consolidation_failed_at IS NULL` 的事实(`maintenance.py:9-14, 422-490`;0.10.2 起对 store-owned bank 的记忆不在 `memory_units` 表里,该例程扫不到,另经 memories store 的 backlog 计数逐 schema 补扫一遍,`maintenance.py:431-455`)。
-3. **手动**:管理 API / bank 导入模板也可触发(未逐一展开,`submit_async_consolidation` 是公共入口,`memory_engine.py:22565`)。
+3. **手动**:管理 API / bank 导入模板也可触发(未逐一展开,`submit_async_consolidation` 是公共入口,`memory_engine.py:22591`)。
 
-投递本身是**按 bank 去重**的异步操作:"Deduplicates by bank_id - if there's already a pending consolidation for this bank, returns the existing operation_id"(`memory_engine.py:22577-22579`);但带 `observation_scopes` 的定向投递**跳过去重**,避免被并进全库大扫除(`memory_engine.py:22621-22623`)。执行者是 worker 池:consolidation 配了独立的"空闲超时"(`worker/poller.py:85-89`)——计时器量的是"距上次有进展过了多久"(`consolidation_wall_timeout`),有进展就续期,所以限制的是卡死而不是总时长;每类操作的槽位保留走 `worker_slot_reservations`(未配置时默认给 consolidation 预留 2 个槽,`worker/poller.py:327-330`;运行时在 `worker/main.py:248` 读取)。
+投递本身是**按 bank 去重**的异步操作:"Deduplicates by bank_id - if there's already a pending consolidation for this bank, returns the existing operation_id"(`memory_engine.py:22603-22605`);但带 `observation_scopes` 的定向投递**跳过去重**,避免被并进全库大扫除(`memory_engine.py:22647-22649`)。执行者是 worker 池:consolidation 配了独立的"空闲超时"(`worker/poller.py:85-89`)——计时器量的是"距上次有进展过了多久"(`consolidation_wall_timeout`),有进展就续期,所以限制的是卡死而不是总时长;每类操作的槽位保留走 `worker_slot_reservations`(未配置时默认给 consolidation 预留 2 个槽,`worker/poller.py:327-330`;运行时在 `worker/main.py:248` 读取)。
 
 ### 数据流机制图
 
@@ -262,8 +264,8 @@ flowchart TD
 - **开关**:bank 级 `enable_observations=false` 直接返回 disabled(`consolidator.py:1502-1504`)。
 - **取数**:`_fetch_unconsolidated_rows(conn, bank_id, ["experience", "world"], …)` 只取原始事实,每批 `consolidation_batch_size`(默认 50,`config.py:1741`)条(`consolidator.py:1292-1347`,调用点 1609-1616)。observation 本身不再进原料,否则会自我引用。注意两个批量的层次:取数批 `consolidation_batch_size`(默认 50)只是内存装载粒度;真正发给 LLM 的每次调用最多 `consolidation_llm_batch_size`(默认 8,`config.py:1745`)条事实。并行度大于 1 时,一轮的取数不再严格全库 oldest-first,而是读一个 5 倍窗口、按组内最老事实的顺序访问各组、每组至多取 `ceil(limit / parallelism)` 条(`_fair_group_slice`,`consolidator.py:1268-1290`)——否则最老事实全在一个组时,一轮只有一组活干,并行槽位全部空转,#4895。
 - **分组是安全边界**:memory 按 `_consolidation_batch_key` 分组,"memories targeting different observation scopes must never share an LLM call"(`consolidator.py:1622-1631` + `consolidator.py:578-616`)——key 不是原始 tags,而是**解析后的目标 scope**(scope:按记忆 tags 划分的观察分组域,机制详见 3.5),防止 `observation_scopes="shared"` 的记忆与普通 tagged 记忆混进一个 LLM 调用造成跨 scope 泄漏(#3924)。并行的组对重叠的写 scope 按 `_scope_sort_key` 全序加锁,避免死锁(`consolidator.py:619-628`)。
-- **每批内部**(`_process_memory_batch`,`consolidator.py:2263`):先逐条并行召回该事实相关的已有 observation(走 `recall_async(fact_type=["observation"])`),并成 union;再一次 LLM 调用产出 `creates/updates/deletes` 三数组;然后"先在事务外准备好每个动作(嵌入、安全校验、dedup 裁决),最后**一个事务**全部落库"。事务里同时给本批源事实打 `consolidated_at` 戳——"writes derived from one LLM response are now all-or-nothing"(`consolidator.py:2392-2406, 2564-2657`,#3876:半应用的批次曾把 observation 删了、替代品没写、源事实还被盖了戳,知识永久丢失)。0.10.2 起写事务开头还有一道**读后变更检查**:在 `FOR SHARE` 下重读每条源事实的 `updated_at`(只有真正的编辑会盖它,consolidation 自己的簿记不盖),与批次读取时不一致就把整份 LLM 响应连同戳一起丢弃、事实留在 pending 队列里按现状重做——否则 LLM 调用期间的一次 retag 会让响应按旧 tags 重建 observation,并把重排队标记冲掉(#4893,`_sources_changed_since_read`,`consolidator.py:653-676, 2573-2581`)。语义 dedup 默认开启:新 observation 与既有行的余弦相似度达到 `consolidation_dedup_threshold`(默认 0.97,`config.py:1750` "set to 1.0 to disable")即触发一次 1-by-1 LLM 裁决合并;置 1.0 关闭,Oracle 上无条件跳过(merge 路径用 Postgres-only SQL,`_dedup_active`,`consolidator.py:200-211`)。
-- **LLM 调用**(`_consolidate_batch_with_llm`,`consolidator.py:3173`):结构化输出(`response_format=_ConsolidationBatchResponse`),温度用 `llm_temperature_consolidation`,支持 strict schema;失败时**自适应二分**:子批减半重试直到单条,单条仍失败打 `consolidation_failed_at` 标记,绝不静默丢弃(`consolidator.py:1672-1675` 注释,二分在 1783-1796)。系统 prompt 与 bank 无关、可跨 bank 共享一个上下文缓存;bank 的 mission/容量提示/数据都在 user message(`consolidator.py:3221-3236`)。模型产出的 `source_fact_ids` 在解析时**去重**——一个循环抽风的模型能把同一个 id 重复上千次,重复项曾被存进 `source_memory_ids` 并在下一次 prompt 里按次数重复整段事实文本(#4867,`_unique_source_ids`,`consolidator.py:695-701`;prompt 展示与 `proof_count` 计数同样按去重后的 id,`consolidator.py:3031-3047`)。
+- **每批内部**(`_process_memory_batch`,`consolidator.py:2263`):先逐条并行召回该事实相关的已有 observation(走 `recall_async(fact_type=["observation"])`),并成 union;再一次 LLM 调用产出 `creates/updates/deletes` 三数组;然后"先在事务外准备好每个动作(嵌入、安全校验、dedup 裁决),最后**一个事务**全部落库"。事务里同时给本批源事实打 `consolidated_at` 戳——"writes derived from one LLM response are now all-or-nothing"(`consolidator.py:2392-2406, 2564-2657`,#3876:半应用的批次曾把 observation 删了、替代品没写、源事实还被盖了戳,知识永久丢失)。0.10.2 起写事务开头还有一道**读后变更检查**:在 `FOR SHARE` 下重读每条源事实的 `updated_at`(只有真正的编辑会盖它,consolidation 自己的簿记不盖),与批次读取时不一致就把整份 LLM 响应连同戳一起丢弃、事实留在 pending 队列里按现状重做——否则 LLM 调用期间的一次 retag 会让响应按旧 tags 重建 observation,并把重排队标记冲掉(#4893,`_sources_changed_since_read`,`consolidator.py:653-676, 2573-2581`)。0.10.2 线内(#4897)给 update 动作补了同族的另一半:**tags 合并的基准不再是批次快照**,而是 `FOR NO KEY UPDATE` 行锁下重读的观察**当前 tags**(新 store 接口 `lock_observation_tags`,PG 实现 `memories/pg/consolidation.py:57-66`,基类默认为无锁读 `memories/base.py:3636-3645`;观察已消失则整个 update 跳过,`consolidator.py:2796-2819`)——召回先于 LLM/embedding 工作,快照里的 tags 可能已过时,按它合并会丢掉新加的 tag、还会把已删的 tag 找回来。语义 dedup 默认开启:新 observation 与既有行的余弦相似度达到 `consolidation_dedup_threshold`(默认 0.97,`config.py:1750` "set to 1.0 to disable")即触发一次 1-by-1 LLM 裁决合并;置 1.0 关闭,Oracle 上无条件跳过(merge 路径用 Postgres-only SQL,`_dedup_active`,`consolidator.py:200-211`)。
+- **LLM 调用**(`_consolidate_batch_with_llm`,`consolidator.py:3183`):结构化输出(`response_format=_ConsolidationBatchResponse`),温度用 `llm_temperature_consolidation`,支持 strict schema;失败时**自适应二分**:子批减半重试直到单条,单条仍失败打 `consolidation_failed_at` 标记,绝不静默丢弃(`consolidator.py:1672-1675` 注释,二分在 1783-1796)。系统 prompt 与 bank 无关、可跨 bank 共享一个上下文缓存;bank 的 mission/容量提示/数据都在 user message(`consolidator.py:3231-3246`)。模型产出的 `source_fact_ids` 在解析时**去重**——一个循环抽风的模型能把同一个 id 重复上千次,重复项曾被存进 `source_memory_ids` 并在下一次 prompt 里按次数重复整段事实文本(#4867,`_unique_source_ids`,`consolidator.py:695-701`;prompt 展示与 `proof_count` 计数同样按去重后的 id,`consolidator.py:3041-3057`)。0.10.2 线内(#5247)补了落库侧的账:**insert 即写 `proof_count = len(source_memory_ids)`**(`memories/pg/consolidation.py:347`、基类 `memories/base.py:3719`;`_apply_create_observation` 先对存活源 id 去重,`consolidator.py:3404-3409`)——此前 INSERT 硬编码 1,多源观察要等下一次 update 才被纠正。
 - **round 限流与链式续跑**:`consolidation_max_memories_per_round` 用尽则重新投递 consolidation,并把本轮触及的 tags 累积透传(`pending_refresh_tags`),保证 mental model 刷新在**链条最后一轮**精确触发一次而不是每轮都触发/被丢(#3411,`consolidator.py:2019-2050, 2102-2131`);0.10.2 起这组 tags 随每个批次的见证事务持久化进操作的 `task_payload`,中途崩溃的轮次重试后也不丢(`_persist_pending_refresh_tags`,`consolidator.py:1377-1407`)。
 - **收尾触发刷新**:调 `_trigger_mental_model_refreshes`(`consolidator.py:2154-2260`):查 `trigger->>'refresh_after_consolidation' = true` 的 mental models,先用 tags 预筛、再用 `compute_mental_model_is_stale` 按模型自己的 scope 精确确认,然后 `submit_async_refresh_mental_model(skip_if_in_flight=True)` 投递刷新;上次刷新失败、已被暂停的模型会被跳过并记日志(`consolidator.py:2247-2251`,暂停机制见 3.4 第 6 点)。staleness 判定的廉价半边 `_may_need_refresh`(`memory_engine.py:1947-1972`)在 Oracle 上还有一处方言修正:TIMESTAMP 列返回 naive 值而 bank 写水位是 aware,直接比较会抛 "can't compare offset-naive and offset-aware datetimes",0.10.2 起两侧都归一到 UTC 再比(#4627;此前曾把 Oracle 后端的 search_mental_models 与 knowledge page 创建整个打挂)。
 
@@ -291,7 +293,7 @@ flowchart TD
 **(a) 数据模型层——每条合成知识都背着账本。**
 - observation 行携带 `proof_count INT`、`source_memory_ids UUID[]`(`alembic/versions/p1k2l3m4n5o6_new_knowledge_architecture.py:96-110`),时间边界由 `_aggregate_source_fields` 从源事实**确定性聚合**(取 min(occurred_start)/max(occurred_end)/max(mentioned_at),`consolidator.py:832-855`),不是 LLM 编的。
 - 每次 UPDATE 前把旧状态快照写进 `observation_history` 表(`_append_observation_history`,`consolidator.py:2704-2750`):`previous_text`/`previous_tags`/`previous_occurred_*`/`previous_mentioned_at`/`new_source_memory_ids`,行数按 `max_entries` 截断。
-- mental model 刷新把本次实际用到的证据按类型序列化进 `reflect_response.based_on`(每条 `{id, text, type, context}`,`memory_engine.py:17366-17392`)——文档被谁支撑、支撑它的原文是什么,永远可查。
+- mental model 刷新把本次实际用到的证据按类型序列化进 `reflect_response.based_on`(每条 `{id, text, type, context}`,`memory_engine.py:17392-17418`)——文档被谁支撑、支撑它的原文是什么,永远可查。
 
 **(b) reflect 协议层——引用与正文物理分离。**
 `done` 工具的 schema(`reflect/tools_schema.py:185-220`)里 `answer` 的描述是 "NEVER include memory IDs, UUIDs, or 'Memory references' in this text - put IDs only in memory_ids array"。加上 2.1 的 `available_*_ids` 校验,`based_on` 里的每一条都指向一个真实存在、且被工具返回过的记忆行。
@@ -351,9 +353,9 @@ tables rather than flagging it: live facts live in ``memory_units``,
 invalidated ones in ``invalidated_memory_units``. Recall/consolidation/
 graph queries therefore need no state predicate.
 ```
-(`memory_engine.py:11809-11812`,curate_memory_unit 的 docstring)
+(`memory_engine.py:11835-11838`,curate_memory_unit 的 docstring)
 
-**(2) observation 的级联清扫**:删除/失效/重摄取路径都会调 `_delete_stale_observations_for_memories`(`memory_engine.py:10681, 10708, 10959, 10988, 11176, 11338, 11741, 12188-12247`)。合同是"任一"而非"全部":引用了**任一**被删/失效源事实的 observation 整条删除——docstring 原文 "For each observation referencing any of ``fact_ids``: 1. Delete the observation (its text is stale once even one source memory disappears). 2. Reset the consolidated marker on the surviving source memories so they get re-consolidated"(`engine/retain/fact_storage.py:164-168`;同文 `engine/memories/pg/writes.py:259-262`);幸存的共源 facts 重置 `consolidated_at = NULL` 等待下轮再巩固(`writes.py:324-332`);observation_history 快照在同一事务里显式清理(历史表的外键被显式断开后改为手动清理,`writes.py:316-322` 与 `consolidator.py:2913-2931`)。历史上文档重摄取曾造成孤儿 observation(FK 级联删了源却没通知 observation),迁移 `c4x5y6z7a8b9_backsweep_orphan_observations_v2.py:6-14` 记录了这次补课。
+**(2) observation 的级联清扫**:删除/失效/重摄取路径都会调 `_delete_stale_observations_for_memories`(`memory_engine.py:10707, 10734, 10985, 11014, 11202, 11364, 11767, 12214-12273`)。合同是"任一"而非"全部":引用了**任一**被删/失效源事实的 observation 整条删除——docstring 原文 "For each observation referencing any of ``fact_ids``: 1. Delete the observation (its text is stale once even one source memory disappears). 2. Reset the consolidated marker on the surviving source memories so they get re-consolidated"(`engine/retain/fact_storage.py:164-168`;同文 `engine/memories/pg/writes.py:259-262`);幸存的共源 facts 重置 `consolidated_at = NULL` 等待下轮再巩固(`writes.py:324-332`);observation_history 快照在同一事务里显式清理(历史表的外键被显式断开后改为手动清理,`writes.py:316-322` 与 `consolidator.py:2923-2941`)。历史上文档重摄取曾造成孤儿 observation(FK 级联删了源却没通知 observation),迁移 `c4x5y6z7a8b9_backsweep_orphan_observations_v2.py:6-14` 记录了这次补课。
 
 **(3) mental model 的 retraction:靠主动对账把"行不存在"翻出来。** 难点在于:文档引用的某条事实被删后,三个现成信号全都探测不到它——staleness 只回答"上次刷新后有没有新写入",delta prompt 只喂"新增事实",而撤回掉的是一行的"缺席":它既不会推进水位,也进不了任何 prompt(`reflect/retractions.py:1-30` 的模块 docstring 把这点讲得最透)。先对齐两个词:"水位"是 mental model 记住的"已读到哪"标记,"delta"指只看新增变化的增量刷新,其编辑动作列表叫 delta ops——都在 3.4 展开。所以刷新管线主动对账:
 
@@ -375,12 +377,12 @@ graph queries therefore need no state predicate.
                                 f"{freshness['pending']} fact(s) are still pending consolidation"
                             )
 ```
-(`memory_engine.py:17430-17455`,节选)
+(`memory_engine.py:17456-17481`,节选)
 
 要点:
 - `MEMORY_BACKED_FACT_TYPES = frozenset({"world", "experience", "observation"})`(`retractions.py:44`)是**允许清单**——`based_on` 里的 `mental-models`/`directives` 指向别的表,误算会把健康文档"撤"到只剩渣。`opinion` 也被排除,因为今天没有这种 fact_type 落库,把无法解析的 id 当撤回是此模块绝不能犯的错(`retractions.py:35-43`)。
 - **全灭 = 断链而非撤回**:`unresolvable` 属性(`retractions.py:67-84`)——引用的每一条都不在时,多半是整库导入把 `mental_models` 行原样搬来、记忆却是新 id 的场景;这时只剪悬空引用、不动正文(不可恢复的误删 vs 暂留一句旧话,取后者)。
-- **延迟撤回**:文档重摄取会先删后补,旧 id 短暂消失、替代品要等 consolidation 跑完才出现;此时撤回会删掉"仍为真的句子"且 id 已离开 based_on、永远无人再发现。所以看到 pending consolidation 就挂起,staleness 每轮重提(`memory_engine.py:17443-17455` 注释)。
+- **延迟撤回**:文档重摄取会先删后补,旧 id 短暂消失、替代品要等 consolidation 跑完才出现;此时撤回会删掉"仍为真的句子"且 id 已离开 based_on、永远无人再发现。所以看到 pending consolidation 就挂起,staleness 每轮重提(`memory_engine.py:17469-17481` 注释)。
 - 撤回本身由 `STRUCTURED_RETRACTION_SYSTEM_PROMPT` + delta ops 执行(`reflect/prompts.py:1469+`),操作结果记录在 `MentalModelRetraction`(`mental_model_refresh.py:202-232`):fact_ids、**fact_texts(行已删,文档记下的文本是唯一幸存记录)**、applied、deferred_reason。
 
 ## 3.4 mental model 刷新:full vs delta、水位与幂等
@@ -389,18 +391,18 @@ graph queries therefore need no state predicate.
 
 **触发器有三种**:consolidation 链尾的 `refresh_after_consolidation`(2.2);MaintenanceLoop 的 `refresh_cron` 定时检查——"refresh mental models whose trigger.refresh_cron schedule is due, but only when the model is stale … so a scheduled tick never burns an LLM call to regenerate identical content"(`maintenance.py:16-20`);用户手动(dry run 也走同一条管线)。
 
-**刷新管线** `_execute_mental_model_refresh`(`memory_engine.py:17130` 起)的决策序列:
+**刷新管线** `_execute_mental_model_refresh`(`memory_engine.py:17156` 起)的决策序列:
 
-1. **full/delta 抉择**(`memory_engine.py:17189-17253`):请求 delta 但没有可用 baseline(空内容或占位 "Generating content...")→ fallback `no_baseline_content`;有 baseline 但 `last_refreshed_source_query != source_query`(话题换了)→ fallback `source_query_changed`;首次 delta(无 tracking 行)仍用现有 markdown 当 baseline——"users who write a doc and then enable delta mode expect their content to be the starting point"(用户先写了文档、再开 delta 模式,期望的起点是自己写的内容,而不是被一次全量重建推倒)。0.10.2 起 refresh 的 reflect 预算也由 trigger 自己声明:trigger 新增 `budget`(low/mid/high),**未配置时默认 MID**(`DEFAULT_MENTAL_MODEL_REFRESH_BUDGET`,`memory_engine.py:1597, 17179-17183`)——过去不传时 reflect 按 LOW 处理、把 `reflect_max_iterations` 减半,文档合成的两腿(full 与 delta)都会提前跑断(#4856;#4894)。同一提交里,refresh 也**不再继承** bank 的 `reflect_default_options`:检索 token 覆盖直接取 trigger 自带字段(缺省落到 shipped 默认,`memory_engine.py:17165-17178`),因为那套默认是为"回答问题"调的,不该悄悄改写文档合成。
-2. **快照与水位**(`memory_engine.py:17251-17254, 17308-17317`):`refresh_cutoff` 取数据库当前时间做快照上界,reflect 只读 `created_before` 之前提交的事实;水位 `last_memory_seen_at` 持久化为**快照时刻可见的最大 in-scope `updated_at`** 而不是 `now()`。为什么不能记 `now()`:一行事实的 `updated_at` 在写入事务内就已生成,但外界要等事务 COMMIT 后才看得见它。若把水位记成快照那一刻的 now(),这种"生成于快照前、提交于快照后"的事务就会被当作"已处理"——从此任何刷新窗口都读不到它,永久丢失;把水位锚在"本次实际看到的最大 `updated_at`"上,下次刷新的窗口仍会把它圈进来(读数经 memories store 的 `newest_memory_updated_at` 获得,scope/tag/窗口过滤都已在查询内,#4968)。
-3. **delta 窗口**(`memory_engine.py:17294-17307`):`created_after = last_memory_seen_at`(不是上次刷新的墙钟时间——两次之间写入的都算新信息),传给 reflect 后所有工具的时间谓词统一收窄。
-4. **空 scope 不烧 LLM**(`memory_engine.py:17331-17364`,#3875):水位查询本身就回答了"有没有东西可读"(它已按 tags/tag_groups/fact_types 过滤);没有新事实且 bank 里没有可读的兄弟文档(排除占位行;兄弟文档也是 agent 能检索的证据源,所以只有连它们都没有时才真跳过)→ 直接跳过 reflect 循环,但**管线继续走**——"A retraction is a reason to edit the document all by itself",把撤回和"有无新事实"解耦,否则一个安静的 bank 上退休的论断会永远活着。新建 bank 曾因此把 LLM 预算全烧在五个空 reflect 上。
+1. **full/delta 抉择**(`memory_engine.py:17215-17279`):请求 delta 但没有可用 baseline(空内容或占位 "Generating content...")→ fallback `no_baseline_content`;有 baseline 但 `last_refreshed_source_query != source_query`(话题换了)→ fallback `source_query_changed`;首次 delta(无 tracking 行)仍用现有 markdown 当 baseline——"users who write a doc and then enable delta mode expect their content to be the starting point"(用户先写了文档、再开 delta 模式,期望的起点是自己写的内容,而不是被一次全量重建推倒)。0.10.2 起 refresh 的 reflect 预算也由 trigger 自己声明:trigger 新增 `budget`(low/mid/high),**未配置时默认 MID**(`DEFAULT_MENTAL_MODEL_REFRESH_BUDGET`,`memory_engine.py:1597, 17205-17209`)——过去不传时 reflect 按 LOW 处理、把 `reflect_max_iterations` 减半,文档合成的两腿(full 与 delta)都会提前跑断(#4856;#4894)。同一提交里,refresh 也**不再继承** bank 的 `reflect_default_options`:检索 token 覆盖直接取 trigger 自带字段(缺省落到 shipped 默认,`memory_engine.py:17191-17204`),因为那套默认是为"回答问题"调的,不该悄悄改写文档合成。
+2. **快照与水位**(`memory_engine.py:17277-17280, 17334-17343`):`refresh_cutoff` 取数据库当前时间做快照上界,reflect 只读 `created_before` 之前提交的事实;水位 `last_memory_seen_at` 持久化为**快照时刻可见的最大 in-scope `updated_at`** 而不是 `now()`。为什么不能记 `now()`:一行事实的 `updated_at` 在写入事务内就已生成,但外界要等事务 COMMIT 后才看得见它。若把水位记成快照那一刻的 now(),这种"生成于快照前、提交于快照后"的事务就会被当作"已处理"——从此任何刷新窗口都读不到它,永久丢失;把水位锚在"本次实际看到的最大 `updated_at`"上,下次刷新的窗口仍会把它圈进来(读数经 memories store 的 `newest_memory_updated_at` 获得,scope/tag/窗口过滤都已在查询内,#4968)。
+3. **delta 窗口**(`memory_engine.py:17320-17333`):`created_after = last_memory_seen_at`(不是上次刷新的墙钟时间——两次之间写入的都算新信息),传给 reflect 后所有工具的时间谓词统一收窄。
+4. **空 scope 不烧 LLM**(`memory_engine.py:17357-17390`,#3875):水位查询本身就回答了"有没有东西可读"(它已按 tags/tag_groups/fact_types 过滤);没有新事实且 bank 里没有可读的兄弟文档(排除占位行;兄弟文档也是 agent 能检索的证据源,所以只有连它们都没有时才真跳过)→ 直接跳过 reflect 循环,但**管线继续走**——"A retraction is a reason to edit the document all by itself",把撤回和"有无新事实"解耦,否则一个安静的 bank 上退休的论断会永远活着。新建 bank 曾因此把 LLM 预算全烧在五个空 reflect 上。
 5. **delta 落地为结构化操作,不是重写**。reflect 以 `answer_as_document=True` 运行——模型**声明文档结构**(sections/blocks),markdown 由代码确定性渲染,模型写的 markdown 永远不会被解析回结构(#3361:解析式 round-trip 曾把表格永久焊成一行)。delta 模式下,另一次 LLM 调用按 `STRUCTURED_DELTA_SYSTEM_PROMPT` 产出操作列表,`reflect/delta_ops.py:106-152` 定义了 `append_block`/`insert_block`/`replace_block`/`remove_block`/`add_section` 等 op。模块 docstring(`delta_ops.py:1-40`)给出三条设计公理:
    - 未被任何 op 提及的 section/block **物理原样拷贝**——"prose drift is structurally impossible";
    - 用 **id 而非索引**寻址:索引要靠模型数数,差一仍在界内会静默改错块;id 是复制来的,错了不解析、跳过并上报(#3273);
    - 失败即零变更:"The structure can only get better or stay the same per refresh, never get worse."
 
-   0.10.2 补了两类"引用错了也不静默"的缺口:op 列表解析通过、但**每个 section_id/block_id 都在文档里找不到**时——全部悬空,或只有一枚打错的 block id 混在正确 op 里(那会让它想替换的块原样留在文档里)——模型会被**再问一次**,错误引用连同真实的 section/block id 清单一起引述回来,而修正轮只是追加在原对话之后(前缀不变,provider 的 prompt cache 仍然命中);重试后仍不达,才按公理零变更。retraction 的编辑 pass 不开这道闸:对它"什么都没改"是合法回答(#4206、#4829、#4578,`request_delta_operations`,`delta_ops.py:442-511`)。同一提交还让 `add_section` 之后同批的 op 能用**链式锚点**寻址新建的 section:模型只见过自己写的标题,代码按"精确 id → 本批新建 section 的 id → slug → 标题原文"逐级解析(#4768,`delta_ops.py:602-608`)。
+   0.10.2 补了两类"引用错了也不静默"的缺口:op 列表解析通过、但**每个 section_id/block_id 都在文档里找不到**时——全部悬空,或只有一枚打错的 block id 混在正确 op 里(那会让它想替换的块原样留在文档里)——模型会被**再问一次**,错误引用连同真实的 section/block id 清单一起引述回来,而修正轮只是追加在原对话之后(前缀不变,provider 的 prompt cache 仍然命中);重试后仍不达,才按公理零变更。retraction 的编辑 pass 不开这道闸:对它"什么都没改"是合法回答(#4206、#4829、#4578,`request_delta_operations`,`delta_ops.py:469-559`)。0.10.2 线内(#4999/#4965)又堵了一个重试本身的洞:那轮被追加回去的"模型自己的回复"必须以**文本**重建(`_replayed_reply_text`,`delta_ops.py:442-468`)——delta 调用带 `response_format`,provider 返回的 `content` 是解析后的对象(或 skip_validation 下的 dict),原样回放进 `messages[N].content` 会被严格请求体校验器拒以 422、根本发不出去,调用方的重试梯子随后原样重发同一份 body,delta 就这样在一次"报成功"的刷新里被丢掉;现在按 `BaseModel → model_dump_json()`、`dict/list → json.dumps()` 序列化(已是文本则原样透传),模型读回的是它写的文档而不是对象的 repr。链式锚点(#4768,0.10.2 基线内)则让 `add_section` 之后同批的 op 能用模型自己写过的标题寻址新建的 section:代码按"精确 id → 本批新建 section 的 id → slug → 标题原文"逐级解析(`delta_ops.py:628-637`)。
 
 图 3 把刷新管线的分支收敛画出来:content_written、content_unchanged 与"无新事实"三条分支最终汇到同一个 `update_mental_model` 调用——差别只在 content 参数,水位都推进。
 
@@ -427,16 +429,16 @@ flowchart TD
 ```
 
 6. **幂等与成本控制汇总**:
-   - **水位不回退**:成功刷新持久化 `max(newest_in_scope, current_watermark)`,注释明确 "never moves backwards"(`memory_engine.py:1811-1814`);
+   - **水位不回退**:成功刷新持久化 `max(newest_in_scope, current_watermark)`,注释明确 "never moves backwards"(`memory_engine.py:1812-1815`);
    - **空跑免费**:第 4 点的空 scope 检查让定时 tick 不花一次 LLM;
    - **事务一致性**:刷新结果落库有守卫——run 失败/无答案(`ReflectNoAnswerError`,#2959:占位句曾被当真答案存进文档)或工具抛错时,调用方"never reach the write",文档与水位原地保留;
-   - **失败即暂停,不再按 tick 付费**(#4618,0.10.2):刷新失败时先落一行 `UPDATE mental_models SET last_refresh_failed_at = now()`(迁移 `b8d3f1a6c2e4`;先盖戳再写可选的历史行,保证守卫一定落地,`memory_engine.py:18729-18785`)。此后两个自动触发器——cron 扫描与 consolidation 链尾——都跳过该模型(`_automatic_refresh_paused`,`memory_engine.py:23105-23124`;"只有显式刷新能解开暂停,因为只有它把 `last_refreshed_at` 推过 `last_refresh_failed_at`"),worker 的重试用完为止,不再每个 tick 给同一份 prompt 重付一次 LLM 账单(#4532)。配套的护栏:后台刷新有了自己的 worker 墙钟上限 `HINDSIGHT_API_REFLECT_WALL_TIMEOUT`,超时按失败计(#4581,`worker/poller.py:90-92`);刷新的 LLM 超时不再继承 reflect 面向交互请求的 30s 默认,而是 `HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_TIMEOUT` 回落 `HINDSIGHT_API_LLM_TIMEOUT`(`memory_engine.py:2691-2699`);失败的刷新不盖 `last_refreshed_source_query`,source_query 改过之后的重试仍会走 full(#4579)。失败同时记入模型历史(kind=failure,与成功 trace 分开计数、分别截断,`memory_engine.py:18687-18727`),control plane 显示 Paused/Retrying 状态。
+   - **失败即暂停,不再按 tick 付费**(#4618,0.10.2):刷新失败时先落一行 `UPDATE mental_models SET last_refresh_failed_at = now()`(迁移 `b8d3f1a6c2e4`;先盖戳再写可选的历史行,保证守卫一定落地,`memory_engine.py:18755-18811`)。此后两个自动触发器——cron 扫描与 consolidation 链尾——都跳过该模型(`_automatic_refresh_paused`,`memory_engine.py:23131-23150`;"只有显式刷新能解开暂停,因为只有它把 `last_refreshed_at` 推过 `last_refresh_failed_at`"),worker 的重试用完为止,不再每个 tick 给同一份 prompt 重付一次 LLM 账单(#4532)。配套的护栏:后台刷新有了自己的 worker 墙钟上限 `HINDSIGHT_API_REFLECT_WALL_TIMEOUT`,超时按失败计(#4581,`worker/poller.py:90-92`);刷新的 LLM 超时不再继承 reflect 面向交互请求的 30s 默认,而是 `HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_TIMEOUT` 回落 `HINDSIGHT_API_LLM_TIMEOUT`(`memory_engine.py:2691-2699`);失败的刷新不盖 `last_refreshed_source_query`,source_query 改过之后的重试仍会走 full(#4579)。失败同时记入模型历史(kind=failure,与成功 trace 分开计数、分别截断,`memory_engine.py:18713-18753`),control plane 显示 Paused/Retrying 状态。
    - **dry run 可重复**:`MentalModelDryRunRefreshResult`(`mental_model_refresh.py:304-369`)跑同一条管线但不持久化,"a delta dry run is repeatable: it reads the same window the next real refresh would";每次刷新的决策(模式、fallback 原因、outcome、retraction、token 用量、warnings)都结构化上报,不再只进日志;
-   - **based_on 累积去重**:delta 模式把上次的 based_on 并进来(按 id 去重,`memory_engine.py:17457-17469`),文档的账本覆盖全部历史证据;而发给 delta LLM 的 supporting facts **只用本次的**,避免把历史证据重发一遍撑爆输入上限(`memory_engine.py:17405-17410` 注释,Z.ai 1261)。
+   - **based_on 累积去重**:delta 模式把上次的 based_on 并进来(按 id 去重,`memory_engine.py:17483-17495`),文档的账本覆盖全部历史证据;而发给 delta LLM 的 supporting facts **只用本次的**,避免把历史证据重发一遍撑爆输入上限(`memory_engine.py:17431-17436` 注释,Z.ai 1261)。
 
 ## 3.5 per-scope consolidation strategies(commit 4133ae85c)
 
-**必答问题 3 的后半(按什么 scope 分)**。commit 4133ae85c(2026-09-22,#4619)引入层级配置 `consolidation_strategies`(env `HINDSIGHT_API_CONSOLIDATION_STRATEGIES`,`config.py:863` + 可按 bank 覆盖):一个 bank 可以按 user/team/company tag 域"联邦化",每个 scope 用自己的观察 mission 和容量。0.10.2 起(#4654)该配置是**类型化的**:`ConsolidationStrategySpec`/`ConsolidationScopePattern` 进入 OpenAPI 与各生成 SDK(`engine/response_models.py:676-741`,写路径校验用的是禁止未知键的 `StrictConsolidationStrategySpec`,737),bank-config 写路径在保存时校验形状、以 400 拒绝畸形值并指名第几个条目的哪个字段——过去一个 typo("scope" 写成 "scopes")会被默默存下、策略终身不生效且无处可查;不完整的草稿(还没填 tags 的规则、还没设任何 override 的策略)仍被接受,因为控制台按类型保存、consolidation 会忽略不可用的条目(`config_resolver.py:839-858`)。
+**必答问题 3 的后半(按什么 scope 分)**。commit 4133ae85c(2026-09-22,#4619)引入层级配置 `consolidation_strategies`(env `HINDSIGHT_API_CONSOLIDATION_STRATEGIES`,`config.py:863` + 可按 bank 覆盖):一个 bank 可以按 user/team/company tag 域"联邦化",每个 scope 用自己的观察 mission 和容量。0.10.2 起(#4654)该配置是**类型化的**:`ConsolidationStrategySpec`/`ConsolidationScopePattern` 进入 OpenAPI 与各生成 SDK(`engine/response_models.py:678-743`,写路径校验用的是禁止未知键的 `StrictConsolidationStrategySpec`,739),bank-config 写路径在保存时校验形状、以 400 拒绝畸形值并指名第几个条目的哪个字段——过去一个 typo("scope" 写成 "scopes")会被默默存下、策略终身不生效且无处可查;不完整的草稿(还没填 tags 的规则、还没设任何 override 的策略)仍被接受,因为控制台按类型保存、consolidation 会忽略不可用的条目(`config_resolver.py:839-858`)。
 
 数据结构(`consolidator.py:969-1030`,节选——`_ScopePattern` 的 docstring 中段略去):
 
@@ -467,7 +469,7 @@ class _ConsolidationStrategy:
 - **首中即整份(win whole)**:`_strategy_for_scope` 返回列表序第一个 claims 该 scope 的策略,"its settings, and for anything it leaves unset, the bank-wide value. A later strategy never fills in the earlier one's gaps"(`consolidator.py:1074-1092`)。刻意不同于初版"逐设置各自找首个设置者"的方案——那会让两个策略静默混在同一 scope 上。
 - **整份配置下放**:`_config_for_scope` 返回一个浅拷贝配置(`consolidator.py:1115-1149`),让下游所有读取者(相关 observation 召回的 source-facts 限额、prompt 里的 mission)无感知地拿到 scope 值;调用点在 `_process_memory_batch` 开头(`consolidator.py:2314`),这正是 #4619 修复的核心——"the related-observation recall now takes that config instead of re-resolving the bank config, so per-scope source-facts limits actually apply"。
 - **旧配置仍在**:`observation_scope_limits` 被标记 DEPRECATED,在策略之后兜底生效(`consolidator.py:871-874, 1095-1112`)。
-- **新端点**:`POST /v1/default/banks/{bank_id}/consolidation-strategies/preview`——预览草稿策略会命中哪些现存 observation scope(上限 10,000,超出置 `complete=false`;#4619 提交说明,请求体自 #4654 起是类型化的 `ConsolidationStrategySpec` 列表,`api/http.py:2257`)。
+- **新端点**:`POST /v1/default/banks/{bank_id}/consolidation-strategies/preview`——预览草稿策略会命中哪些现存 observation scope(上限 10,000,超出置 `complete=false`;#4619 提交说明,请求体自 #4654 起是类型化的 `ConsolidationStrategySpec` 列表,`api/http.py:2259`)。
 
 **scope 的另一维:每条记忆的 `observation_scopes` 模式**(`consolidator.py:474-557`):默认 `combined`(用自己的 tags);`per_tag`(每个 tag 一个 pass);`all_combinations`(所有非空子集);`shared`(解析为空 scope——所有记忆不管 tags 都汇进一条无 tag 的共享观察,用于跨易变 session tag 去重);或显式 `list[list[str]]`。一次记忆可以多 pass 写多个 scope,每个 pass 有独立的 `_config_for_scope` 和 LLM 调用。
 
@@ -476,7 +478,7 @@ class _ConsolidationStrategy:
 **directives 是什么、与 mental model 的区别**:directives 是用户手写的**硬规则**,存独立 `directives` 表(建表见 `p1k2l3m4n5o6_new_knowledge_architecture.py:70-88`),模型定义 `engine/directives/models.py:9-38`:name/content/priority/is_active/tags。docstring 一句话分野:"Unlike mental models which are automatically consolidated from memories, directives are explicit instructions that are always included in relevant prompts."(这句代码注释的 "automatically consolidated" 用得宽:mental model 的内容确实由管线自动生成,但分工见 1.2——observation 是存储层自动合成的知识行,mental model 是其上由 reflect 生成内容的文档页。)典型例子:"Always respond in formal English"、"Never share personal data with third parties"。
 
 运行机制:
-- reflect_async 按请求的 tag scope 加载 active directives(`memory_engine.py:15361-15388`):`apply_all_directives=True` 时无视 tags 全量应用;否则"untagged directives always apply, tagged ones only when the reflect tags match",且开 `isolation_mode` 防止 tagged directive 泄漏进未打标的 reflect。
+- reflect_async 按请求的 tag scope 加载 active directives(`memory_engine.py:15387-15414`):`apply_all_directives=True` 时无视 tags 全量应用;否则"untagged directives always apply, tagged ones only when the reflect tags match",且开 `isolation_mode` 防止 tagged directive 泄漏进未打标的 reflect。
 - 注入三重保险:system prompt 开头 MANDATORY 段 + 结尾 REMINDER 段(3.2)+ **done 工具内置 compliance 字段**——有 directive 时,`done` 的 schema 会追加一个必填字段,强迫模型在交卷前逐条确认合规(`_build_done_tool_with_directives`,`reflect/tools_schema.py:313-369`:"Your answer will be REJECTED if it violates any directive")。
 - `directives_applied` 随 `ReflectAgentResult` 返回(`reflect/models.py:174-176`),刷新文档时 directives 的 id/text 进入 `based_on["directives"]`,但**不参与** retraction 对账(3.3 的允许清单刻意排除了它们)。
 
@@ -488,7 +490,7 @@ class _ConsolidationStrategy:
 
 ## 3.8 Knowledge Base:auto-refreshing 合成文档树
 
-`knowledge_pages` 表(`a9b8c7d6e5f4_add_knowledge_pages.py`)是一棵自引用树:`parent_id` 指向父节点,`kind` 分 `folder`(纯容器,`mental_model_id` NULL)与 `page`(**内容托管在 `mental_models` 行上**——"Content stays in mental_models — this table is metadata + tree structure only")。页面内容由 refresh 管线生成(遗留占位 "Generating content...",`memory_engine.py:168`;bank 模板导入时逐页创建并投递刷新,`api/http.py:4309`,调用点 4263/4298),由 trigger(cron / refresh_after_consolidation)持续保鲜。bank 模板(`_apply_bank_template_resources`)是这套默认页面的主要播种途径。CLAUDE.md 描述的"hindsight fs mount"只读挂载在 hindsight-cli 侧,本模块未展开(未确认其挂载实现细节)。
+`knowledge_pages` 表(`a9b8c7d6e5f4_add_knowledge_pages.py`)是一棵自引用树:`parent_id` 指向父节点,`kind` 分 `folder`(纯容器,`mental_model_id` NULL)与 `page`(**内容托管在 `mental_models` 行上**——"Content stays in mental_models — this table is metadata + tree structure only")。页面内容由 refresh 管线生成(遗留占位 "Generating content...",`memory_engine.py:168`;bank 模板导入时逐页创建并投递刷新,`api/http.py:4311`,调用点 4265/4300),由 trigger(cron / refresh_after_consolidation)持续保鲜。bank 模板(`_apply_bank_template_resources`)是这套默认页面的主要播种途径。CLAUDE.md 描述的"hindsight fs mount"只读挂载在 hindsight-cli 侧,本模块未展开(未确认其挂载实现细节)。
 
 ---
 
@@ -519,7 +521,7 @@ class _ConsolidationStrategy:
 
 **Step 1:retain 完成触发**。`_submit_post_insert_maintenance` 投递 consolidation(去重后一个 bank 一个在途操作)。
 
-**Step 2:批次组装**。取数 → 分组 key 为 `("combined", "user:alice")` → LLM 批(每次调用最多 8 条——与取数批 50 的区别见 2.2 的"两个批量")。每个事实先并行召回相关 observation;首次为空 → `observations_text = "[]"`(`consolidator.py:3188-3189`)。LLM 收到的 user message 形如(摘自 `_fact_line` 的拼装格式,`consolidator.py:3191-3202`):
+**Step 2:批次组装**。取数 → 分组 key 为 `("combined", "user:alice")` → LLM 批(每次调用最多 8 条——与取数批 50 的区别见 2.2 的"两个批量")。每个事实先并行召回相关 observation;首次为空 → `observations_text = "[]"`(`consolidator.py:3198-3199`)。LLM 收到的 user message 形如(摘自 `_fact_line` 的拼装格式,`consolidator.py:3201-3212`):
 
 ```text
 ## MISSION
@@ -551,7 +553,7 @@ Track anything notable in the new facts — names, numbers, dates, ...
 {"id": "o9999999-...", "fact_type": "observation",
  "text": "用户的生产数据库标准是 PostgreSQL,并出于生态与扩展性偏好它;2026 年 1 月将报表系统从 MySQL 迁到了 PostgreSQL。",
  "tags": ["user:alice"],                  // 标签继承自源事实,非 LLM 决定(consolidator.py:2886, 2898)
- "proof_count": 3,
+ "proof_count": 3,                        // 0.10.2 线内 #5247 起,INSERT 即写 len(source_memory_ids);此前硬编码 1,多源观察要等首次 update 才被纠正
  "source_memory_ids": ["f1111111-...", "f2222222-...", "f3333333-..."],
  "occurred_start": "2026-01-10",           // 源事实聚合:min(start)/max(end)/max(mentioned_at)
  "occurred_end": "2026-01-11",
@@ -587,14 +589,14 @@ Track anything notable in the new facts — names, numbers, dates, ...
    ```
 3. **iteration 2**:强制 `search_observations`。`tool_search_observations` 走 `recall_async(fact_type=["observation"])`,返回观察数组(每条已经过 `_drop_unread_fields` 剪掉 scores/metadata 等检索内部字段、`_prune_nulls` 剪空字段,`reflect/tools.py:72-97`)+ 汇总的 `"is_stale"`/`"freshness"`(由 `pending_consolidation` 推导,`reflect/tools.py:449-465`)。
 4. **iteration 3**:强制 `recall` 取原始事实 ground truth(可能带 chunk 原文)。之后进入 `auto`。
-5. **iteration 4(auto)**:模型看到 mental model 的 `is_stale=true`(staleness_reason 即"上次刷新后 scope 内又进了新事实"),且时间规则要求以"最新 `mentioned_at` 的陈述为权威"(observation "o9999999" 的 `mentioned_at` 是 2026-02-02——其源事实中最新的一条;observation 行的 `mentioned_at` 定义即"其源事实 mentioned_at 的最大值",`consolidation/prompts.py:68` `_OBSERVATION_FIELDS`;同一条规则也写进了 reflect 的 Temporal Reasoning 段,`reflect/prompts.py:273-286`),于是调用 `done`,参数(示例;0.10.2 起模型实际写回的是 presentation 层发的短别名如 `f2`/`o1`/`p1`,进入处理前已被 `presenter.resolve` 还原成真实 id,见 2.1):
+5. **iteration 4(auto)**:模型看到 mental model 的 `is_stale=true`(staleness_reason 即"上次刷新后 scope 内又进了新事实"),且时间规则要求以"最新 `mentioned_at` 的陈述为权威"(observation "o9999999" 的 `mentioned_at` 是 2026-02-02——其源事实中最新的一条;observation 行的 `mentioned_at` 定义即"其源事实 mentioned_at 的最大值",`consolidation/prompts.py:68` `_OBSERVATION_FIELDS`;同一条规则也写进了 reflect 的 Temporal Reasoning 段,`reflect/prompts.py:273-286`),于是调用 `done`,参数(示例;0.10.2 起模型实际写回的是 presentation 层发的短别名如 `f2`/`o1`/`p1`,进入处理前已被 `presenter.resolve` 还原成真实 id——0.10.2 线内 #5246/#4876 起,`answer` 正文里引用的别名(如正文写"见 f2")也会被 `resolve_text` 还原成真实 id,最终落库/返回的内容里不会出现任何别名,见 2.1):
    ```jsonc
    {"answer": "**PostgreSQL**。…数据仓库方面,2026-02 的说法是准备迁往 Snowflake。…",
     "memory_ids": ["f4444444-..."], "observation_ids": ["o9999999-..."],
     "mental_model_ids": ["mm-数据偏好"]}
    ```
    (若答案违反"始终用中文"指令,done 的 compliance 必填字段会迫使模型先逐条确认。)
-6. `_process_done_tool`:剔除"未在工具结果里出现过的" ID → `used_*_ids`;若有 `max_tokens` 软目标且超长,先做一次改写(`_rewrite_to_length_budget`);memory_engine 组装 `based_on` 与 trace,返回 `ReflectResult`。全程零写入。
+6. `_process_done_tool`:剔除"未在工具结果里出现过的" ID → `used_*_ids`;若有 `max_tokens` 软目标且超长,先做一次改写(`_rewrite_to_length_budget`;改写响应不是文档时重问一次,仍不达则保留原文,见 2.1 的形状拒收);memory_engine 组装 `based_on` 与 trace,返回 `ReflectResult`。全程零写入。
 
 若第 4 步模型选择直接交卷但还什么都没查,done 守卫会打回(2.1);若它把答案写成 `"answer": "…见 memory_id f4444444…"`,就违反了输出规则——正文与 ID 分离是协议级要求。
 
@@ -602,7 +604,7 @@ Track anything notable in the new facts — names, numbers, dates, ...
 
 # 第 5 层【必答问题速查】
 
-1. **reflect 完整流程**:输入 query(+context/tags/schema)→ 层级配置解析、directives 加载 → `run_reflect_agent` 的 **ReAct 式 native tool-calling 循环**(强制分层:search_mental_models → search_observations → recall → auto;默认 10 轮 ×budget 系数;工具结果经 presentation 层压缩成短别名再进 prompt)→ 停止时优先在原对话内追问一次 `done`,provider 产不出调用或上下文已超预算才走强制合成(超预算 map-reduce)→ `ReflectAgentResult`(text/document/structured_output/引用 ID/trace/usage)。**是工具循环,不是单轮**;且整个操作只读不写。
+1. **reflect 完整流程**:输入 query(+context/tags/schema)→ 层级配置解析、directives 加载 → `run_reflect_agent` 的 **ReAct 式 native tool-calling 循环**(强制分层:search_mental_models → search_observations → recall → auto,空回复的强制步原步重试一次(#5236);默认 10 轮 ×budget 系数;工具结果经 presentation 层压缩成短别名再进 prompt)→ 停止时优先在原对话内追问一次 `done`,provider 产不出调用或上下文已超预算才走强制合成(超预算 map-reduce)→ `ReflectAgentResult`(text/document/structured_output/引用 ID/trace/usage)。**别名——含 `answer`/`document` 正文里写下的——在返回或落库前全部还原为真实 id(#5246/#4876)**;done 文档形状违规会被回喂重交一次,不猜形状(#5249)。**是工具循环,不是单轮**;且整个操作只读不写。
 2. **observation 是什么、和 memory_unit 什么关系**:observation 就是 `memory_units` 表里 `fact_type='observation'` 的一行(不是独立表),由 consolidation 在 retain 之后异步生成——对每批未 consolidate 的原始事实,LLM 输出 creates/updates/deletes;行上带 `proof_count`、`source_memory_ids`、聚合时间字段,变更写 `observation_history`。
 3. **触发与调度**:retain 完成钩子 + MaintenanceLoop 5 分钟补偿 reconcile + 手动;投递按 bank 去重;worker 池执行;round 限流后链式续跑,链尾统一触发 `refresh_after_consolidation` 的 mental model 刷新。**per-scope 策略**按记忆的 tag scope(支持 fnmatch 通配,`tags_match: all|exact`)匹配 `consolidation_strategies` 列表,首中者整份生效,可覆盖 mission / 每域观察上限 / source-facts token 预算;配置已类型化、bank-config 写入即校验(#4654)。
 4. **事实被修正/删除后**:失效=移入 `invalidated_memory_units`(无状态谓词);依赖它的 observation 由 `_delete_stale_observations_for_memories` 级联删除(带历史表清理);mental model 在下次 delta 刷新时经 `partition_retracted` 对照 `reflect_response.based_on` 发现死引用,结构化撤回(有 pending consolidation 则延迟,全灭则只剪引用)。
@@ -614,4 +616,4 @@ Track anything notable in the new facts — names, numbers, dates, ...
 1. `engine/reflect/observations.py`(Observation/Trend/evidence-quote 模型)与 `reflect/models.py` 的 `ReflectAction`/`ObservationSection` 在主链路无引用——判断为上一代"observation 内嵌于 mental model"设计的残留,但未确认是否有外部包(如 hindsight-tools)依赖。
 2. `knowledge_pages` 的 CLI 只读挂载(`hindsight fs mount`)属 hindsight-cli,本模块未读其实现,挂载细节未确认。
 3. `run_consolidation_job` 对 Oracle 方言的 `observation_scopes` 相关 SQL 兼容性(语义 dedup 在 Oracle 上被 `_dedup_active` 无条件跳过——merge 路径的 `unnest`/`array_agg`/`UPDATE ... FROM` 是 Postgres-only,`consolidator.py:200-211`;其余 Oracle 兼容性)未逐行核对。
-4. reflect 的 per-step 上下文缓存(rolling cache)仅在 provider 实现 `supports_incremental_prompt_cache()` **且** `HINDSIGHT_API_REFLECT_PROMPT_CACHE_ENABLED`(默认 true,`config.py:1908`)打开时启用(`agent.py:540-547`);#4656 在 Gemini 上实测该 rolling cache 每个 token 都被全额计费(cache 创建按全 input 计价 + 存储,且每份缓存只被下一次调用读一次),约比不缓存贵 4.6%,但把服务器级默认翻成 off 被认为超出该 PR 的决策范围——默认保留 on,测量结论写在 config 注释里(`agent.py:697-714`),各 provider 的实际支持矩阵仍未逐一确认。
+4. reflect 的 per-step 上下文缓存(rolling cache)仅在 provider 实现 `supports_incremental_prompt_cache()` **且** `HINDSIGHT_API_REFLECT_PROMPT_CACHE_ENABLED`(默认 true,`config.py:1908`)打开时启用(`agent.py:549-556`);#4656 在 Gemini 上实测该 rolling cache 每个 token 都被全额计费(cache 创建按全 input 计价 + 存储,且每份缓存只被下一次调用读一次),约比不缓存贵 4.6%,但把服务器级默认翻成 off 被认为超出该 PR 的决策范围——默认保留 on,测量结论写在 config 注释里(`agent.py:705-722`),各 provider 的实际支持矩阵仍未逐一确认。

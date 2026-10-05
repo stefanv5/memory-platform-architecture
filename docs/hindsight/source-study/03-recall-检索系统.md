@@ -1,6 +1,6 @@
 # 03 · Recall 检索系统庖丁解牛
 
-> 代码基线：`f7dd3f4fd`（v0.10.2，2026-10-03）；本篇已随 0.10.2 全量更新（原基线 `12f2d54f6`）。
+> 代码基线：`5b8356bb2`（v0.10.2，2026-10-05）；本篇已随 0.10.2 全量更新（原基线 `12f2d54f6`；增量窗口 `f7dd3f4fd` → `5b8356bb2`，覆盖 #5231/#5232/#5237 三个 recall 修复及行号漂移）。
 > 研究对象：`hindsight-api-slim/hindsight_api/engine/search/` 及其外围（四条臂的 Postgres SQL 现住在 `engine/memories/pg/recall.py` 与 `engine/memories/pg/link_expansion.py`，#4979 起归 memories store 所有；`query_analyzer.py`、`engine/trigram.py`、`_vector_index.py`、`alembic/` 的索引 DDL、`api/http.py` 的 recall 路由）。
 > 所有论断均先读代码核实，标注 `相对路径:行号`；无法确认之处明确写"未确认"。示例数据一律标注"（示例）"。
 > 本篇回答六个必答问题：① 四条检索臂的确切清单与数据来源（1.3）；② 并行如何实现、某一路失败会怎样（1.4 与 2.3）；③ RRF 公式与各路结果条数上限（3.5）；④ reranker 的输入输出、默认 provider、关闭时行为（3.6）；⑤ temporal 路如何从自然语言抽时间（3.4）；⑥ recall 的缓存与优化手段（3.10）。
@@ -24,7 +24,7 @@ POST /v1/default/banks/{bank_id}/memories/recall
 - `budget`：`low/mid/high`，映射为检索预算 `thinking_budget`（固定档默认 100/300/1000，`config.py:1940-1942`）；
 - `max_tokens`：返回文本的 token 预算（默认 4096）；
 - `min_scores`：四个可选分数下限（`response_models.py:265`）；
-- `temporal_window`：调用方直接给的时间窗（跳过查询文本里的日期解析，`response_models.py:314`）。
+- `temporal_window`：调用方直接给的时间窗（跳过查询文本里的日期解析，`response_models.py:316`）。
 
 引擎入口是 `MemoryEngine.recall_async`（`engine/memory_engine.py:8672`），返回 `RecallResultModel`（results + 可选 trace/entities/chunks/source_facts）。
 
@@ -32,9 +32,9 @@ POST /v1/default/banks/{bank_id}/memories/recall
 
 代码把每条检索路径称为 **arm（臂）**，下文沿用这个称呼。代码本身对这个问题给出了相当具体的回答，散落在注释与设计文档里：
 
-1. **词面精确匹配是向量的盲区。** BM25 臂的注释直言：原生 tsvector 没有 IDF、逐行打分是负担，但它的存在价值就是 lexical 匹配（`engine/search/bm25_term_selection.py:1-29`）。反过来，一个精确的标识符（端口号、版本号）在向量空间里往往被"语义平滑"掉——这也是 recall `MinScores` 模型的 docstring 里说的 "an exact identifier the embedding scores poorly"（`engine/response_models.py:276`）。
+1. **词面精确匹配是向量的盲区。** BM25 臂的注释直言：原生 tsvector 没有 IDF、逐行打分是负担，但它的存在价值就是 lexical 匹配（`engine/search/bm25_term_selection.py:1-29`）。反过来，一个精确的标识符（端口号、版本号）在向量空间里往往被"语义平滑"掉——这也是 recall `MinScores` 模型的 docstring 里说的 "an exact identifier the embedding scores poorly"（`engine/response_models.py:283`）。
 2. **多跳关联是向量够不到的。** 图检索臂的抽象类 docstring：通过实体链接、时间链接、因果链遍历记忆图，"find relevant facts that might not be found by semantic or keyword search alone"（`engine/search/graph_retrieval.py:22-26`）。查询"用户对 PostgreSQL 的看法"时，一条没有共同词面、但与 PostgreSQL 实体相连的吐槽，只有图路能捞回来。
-3. **时间语义是独立维度。** "上周做了什么"这类查询，语义相似度无法表达"时间要在窗口内"；时间臂用 occurred/mentioned 时间字段做入口点选择 + 沿时间/因果边扩散（`engine/memories/pg/recall.py:368-695`）。
+3. **时间语义是独立维度。** "上周做了什么"这类查询，语义相似度无法表达"时间要在窗口内"；时间臂用 occurred/mentioned 时间字段做入口点选择 + 沿时间/因果边扩散（`engine/memories/pg/recall.py:374-714`）。
 4. **单一排序信号会被单臂偏差主导。** RRF 的意义在于把"各自强"的结果汇到一张榜上；而纯 RRF 又有"单臂第一被平均掉"的失败模式——`interleave_fusion` 的 docstring 记录了一个真实案例：consolidation（后台把原始事实整合为"观察"等派生记忆的流程）去重时，语义排名第 1 的"孪生"观察被 RRF 平均到预算线以下，LLM 没看见它，于是新建了重复记忆（`engine/search/fusion.py:112-130`）。
 
 所以 recall 的设计是 **N 个事实类型 × 4 条检索臂**（引擎 docstring 原话 "N*4-way parallel retrieval"，`memory_engine.py:8706`），再融合、重排、截断。
@@ -46,7 +46,7 @@ POST /v1/default/banks/{bank_id}/memories/recall
 | 1 | semantic 语义 | `memory_units.embedding`；每个 `(bank_id, fact_type)` 一个**部分 HNSW 索引**（HNSW = 分层可导航小世界图，pgvector 的近似最近邻索引；`vector_cosine_ops`，迁移 `d5e6f7a8b9c0_add_bank_internal_id_and_per_bank_hnsw.py:103-117`）。例外：memories 由某个 store 承接的 bank（`store_owned_for`）**不建**这组索引——它的 `memory_units` 行恒为空，空索引却仍被共享表上的一切语句的计划/开锁成本摊派（#4659，见 3.1） | `similarity = 1 - (embedding <=> query)` | `engine/memories/pg/recall.py:28-305`；SQL 形状 `engine/sql/postgresql.py:306-335` |
 | 2 | BM25 关键词 | 默认 native：`memory_units.search_vector`（写入路径填充的 tsvector 列——PG 全文检索的词素向量列，`engine/db/ops_postgresql.py:25-61`）+ GIN 索引（倒排索引）`idx_memory_units_text_search`（`migrations.py:1180-1189`）；可换 vchord/pg_textsearch/pgroonga/pg_search 四种扩展索引（`migrations.py:1106-1252`） | `ts_rank_cd(...)` 或对应扩展的 BM25 分 | `engine/sql/postgresql.py:337-449` |
 | 3 | graph 图扩展 | `unit_entities`（实体共现）+ `memory_links`（semantic kNN 链、causes/caused_by/enables/prevents 因果链）+ observation 经 `memory_units.source_memory_ids` 数组列间接遍历（`observation_sources` 结对表仅 Oracle 使用） | `activation`（entity+semantic+causal 加分和，∈[0,3]） | `engine/memories/pg/link_expansion.py` |
-| 4 | temporal 时间 | `memory_units` 的 `occurred_start/occurred_end/mentioned_at` 时间字段做入口点；`memory_links` 中 `temporal/causes/caused_by/enables/prevents` 边做扩散 | `temporal_score`（含 `temporal_proximity`） | `engine/memories/pg/recall.py:368-695` |
+| 4 | temporal 时间 | `memory_units` 的 `occurred_start/occurred_end/mentioned_at` 时间字段做入口点；`memory_links` 中 `temporal/causes/caused_by/enables/prevents` 边做扩散 | `temporal_score`（含 `temporal_proximity`） | `engine/memories/pg/recall.py:374-714` |
 
 一个重要的工程事实：**semantic 与 BM25 不是两条独立 SQL，而是同一条 `UNION ALL` 查询里的两组子查询**（每个 fact_type 一条 semantic 子臂 + 一条 bm25 子臂，`memories/pg/recall.py:166-221`），一次往返同时取回两路候选，并用 `source` 列区分。所以"四路"是**逻辑上的四路**，物理上是"1 条合并 SQL + 1 条时间 SQL + 每 fact_type 一条图 SQL"。
 
@@ -54,9 +54,9 @@ POST /v1/default/banks/{bank_id}/memories/recall
 
 ### 1.4 核心事实速查（必答问题 2/3/4 的答案预告）
 
-- **并行方式**：不是"四路 `asyncio.gather`"。真实执行序是：semantic+BM25 合并 SQL →（同一连接上）时间 SQL → 之后每 fact_type 的图查询用 `asyncio.gather` 并行（`engine/memories/postgres.py:124-251`，`asyncio.gather` 在 ：240；编排原因见 2.3）。某一路失败会怎样：合并 SQL 抛连接类错误时整个 recall 重试（指数退避，`memory_engine.py:8978-8985`）；Oracle Text 索引未同步（DRG-10599 等）时降级为纯 semantic 重发（`memories/pg/recall.py:234-280`）；图臂实体扩展超时只丢弃实体信号、回退 semantic+causal（`memories/pg/link_expansion.py:348-365`）；时间解析抛异常一律降级为"无时间约束"（`temporal_extraction.py:107-115`）。
+- **并行方式**：不是"四路 `asyncio.gather`"。真实执行序是：semantic+BM25 合并 SQL →（同一连接上）时间 SQL → 之后每 fact_type 的图查询用 `asyncio.gather` 并行（`engine/memories/postgres.py:124-251`，`asyncio.gather` 在 ：240；编排原因见 2.3）。某一路失败会怎样：合并 SQL 抛连接类错误时整个 recall 重试（指数退避，`memory_engine.py:8994-9001`）；Oracle Text 索引未同步（DRG-10599 等）时降级为纯 semantic 重发（`memories/pg/recall.py:234-280`）；图臂超时按子臂分治——非观察臂实体扩展超时只丢弃实体信号、回退 semantic+causal（`memories/pg/link_expansion.py:348-365`）；**observation 扩展臂同样受 `link_expansion_timeout` 约束（0.10.2 线内 #5231 补齐，此前这条臂没有超时）**：三信号熔在一条 CTE 里没有更便宜的回退，超时即记日志、该类型图信号整体返回空（`link_expansion.py:423-444`）；时间解析抛异常一律降级为"无时间约束"（`temporal_extraction.py:107-115`）。
 - **RRF**：`score(d) = Σ_lists 1/(k + rank(d))`，`k` 默认 **60**（`fusion.py:29,85`）。含义：文档每在一条臂的榜单排第 r 名就加 1/(60+r)，多臂命中则累加——"多臂都靠前"者胜；k 越大名次差距越被抹平。
-- **各路条数上限**：每臂每 fact_type 最多 `thinking_budget` 条（semantic 臂在 SQL LIMIT 处控制，`recall.py:176`；BM25 臂由 `$3` 参数 LIMIT，`recall.py:206`；图臂 `budget` 截断，`link_expansion.py:268`；时间臂扩散预算同 `thinking_budget`，`recall.py:565`）。融合前还有可选的 `recall_max_candidates_per_source`（每个臂最多向融合池贡献 N 条，0=不设限；默认 **0 = 关闭**，`config.py:1332`）。融合后进 cross-encoder（把 (query, 文档) 成对喂入模型直接输出相关度的重排序器）前有全局候选上限 `reranker_max_candidates` 默认 **300**（`config.py:1304`）。
+- **各路条数上限**：每臂每 fact_type 最多 `thinking_budget` 条（semantic 臂在 SQL LIMIT 处控制，`recall.py:176`；BM25 臂由 `$3` 参数 LIMIT，`recall.py:206`；图臂 `budget` 截断，`link_expansion.py:268`；时间臂扩散预算同 `thinking_budget`，`recall.py:582`）。融合前还有可选的 `recall_max_candidates_per_source`（每个臂最多向融合池贡献 N 条，0=不设限；默认 **0 = 关闭**，`config.py:1332`）。融合后进 cross-encoder（把 (query, 文档) 成对喂入模型直接输出相关度的重排序器）前有全局候选上限 `reranker_max_candidates` 默认 **300**（`config.py:1304`）。
 - **reranker 默认启用**，provider 默认 `local`，默认模型 `cross-encoder/ms-marco-MiniLM-L-6-v2`（`config.py:1273,1275`；`1932 DEFAULT_ENABLE_RERANKING = True`）。bank 级 `enable_reranking=false` 会把默认策略降级为 "rrf" 直通（`memory_engine.py:1651-1660`）。
 
 ---
@@ -67,25 +67,25 @@ POST /v1/default/banks/{bank_id}/memories/recall
 
 （下文的 [1]/[1.5]/[2]/... 步号沿用引擎日志与代码注释的原始编号，便于对照源码。）
 
-`api_recall`（http.py:6056）先做 query 长度校验（>500 token 直接 HTTP 400，http.py:6088-6096，`config.py:1586`），然后调 `recall_async`。`recall_async` 内部：
+`api_recall`（http.py:6058）先做 query 长度校验（>500 token 直接 HTTP 400，http.py:6090-6098，`config.py:1586`），然后调 `recall_async`。`recall_async` 内部：
 
 1. **租户认证 + 取消检查点**（`memory_engine.py:8763-8774`）；查询净化（lone surrogate，:8780）与长度截断到 `recall_max_query_tokens=500`（:8791-8795）。
 2. **fact_type 校验 / bank 存在校验（404）/ 模糊 tag 解析**（:8797-8874，fuzzy tag 见 3.9）。
-3. **解析 bank 配置**，得出 `thinking_budget`（`_resolve_thinking_budget`，:1600-1631：fixed 档直接取 100/300/1000；adaptive 档按 `max_tokens × 比例` 并 clamp 到 [20, 2000]）、`reranker_max_candidates`（:1633-1649）、以及 bank 级开关 `enable_text_search / enable_temporal_retrieval / enable_graph_retrieval / enable_reranking`（:8890-8895）。
-4. **背压**：`async with self._search_semaphore`（每 worker 最多 32 个并发 recall，`config.py:1531`，:8920），失败重试最多 3 次（仅连接类错误，指数退避 0.5s/1s/2s，:8923-8985）。
-5. 进入 `_search_with_retries`（:9102 起）：
-   - **[1] 查询向量化** `generate_embeddings_batch`（:9224）；
-   - **[1.5] 先问 store 能否整单包办**：`get_memories().full_recall(FullRecallRequest)`（:9243-9362）。默认 Postgres store 走基类默认实现返回 `None`（`memories/base.py:1751-1773`），于是落回本地管线；一个自持索引的 store 可以一跳返回全部结果（fusion/rerank 都在 store 侧做完）。
-   - **[2] 四路取回**：`retrieve_all_fact_types_parallel`（:9393）→ 内部先做时间约束提取（CPU，单 worker 线程，`retrieval.py:159-179`），再把整个召回交给 store 的唯一接口 `recall_unified`（`retrieval.py:181-209`）。Postgres 实现见 2.3。
-   - 跨 fact_type 合并四路列表并各自按分数排序（:9432-9468）；可选 per-source 截断（:9470-9490，默认关）。
-   - **[3] 融合**：`reciprocal_rank_fusion`（默认）或 `interleave_fusion`（consolidation 去重专用），3 或 4 个列表取决于时间窗是否存在（:9677-9707）。
-   - **[4] 重排**：RRF 分数预过滤到 `reranker_max_candidates`（:9741-9754，超上限时按 `boosted_rrf_score` 排序截尾；未超则原样放行）；`hydrate_results` 惰性补全候选正文（:9778-9796）；cross-encoder 打分（:9810）或 rrf/interleave 直通（:9816-9831）。
-   - **[4.6] 合成评分**：`apply_combined_scoring` —— `CE × recency_boost × temporal_boost × proof_count_boost`（:9872-9879；公式见 3.7）；**[4.7] 策略加成**（可选，:9880-9893）；按 `weight` 重排。
-   - **[4.9] min_scores 后置过滤**（reranker/final 门，:9904-9917）；**[4.8] prefer_observations 去重**（观察压过其来源原始事实，:9947-10007）。
-   - **[5] 截断**到 `thinking_budget × 2`（:10009-10012；源注释未论证为何是 2 倍）。
-   - **[5.5] chunks 抓取**（独立于 max_tokens，:10014-10139；0.10.2 起（#5030）会按请求的 tag 过滤丢弃"文档本身打了读者不可见标签"的 chunk——一条 fact 可见不等于其来源文档可见，判定收拢在 `engine/source_scope.py`，缺文档/无文档的 chunk 默默失败）。
-   - **[6] token 预算过滤** `select_facts_within_budget`（:10144-10170）。
-   - 实体装配、`RecallScores` 组装（:10369-10377）、trace 终结（:10461）。
+3. **解析 bank 配置**，得出 `thinking_budget`（`_resolve_thinking_budget`，:1600-1631：fixed 档直接取 100/300/1000；adaptive 档按 `max_tokens × 比例` 并 clamp 到 [20, 2000]）、`reranker_max_candidates`（:1633-1649）、以及 bank 级开关 `enable_text_search / enable_temporal_retrieval / enable_graph_retrieval / enable_reranking`（:8906-8911）。
+4. **背压**：`async with self._search_semaphore`（每 worker 最多 32 个并发 recall，`config.py:1531`，:8936），失败重试最多 3 次（仅连接类错误，指数退避 0.5s/1s/2s，:8939-9001）。
+5. 进入 `_search_with_retries`（:9118 起）：
+   - **[1] 查询向量化** `generate_embeddings_batch`（:9240）；
+   - **[1.5] 先问 store 能否整单包办**：`get_memories().full_recall(FullRecallRequest)`（:9259-9378）。默认 Postgres store 走基类默认实现返回 `None`（`memories/base.py:1751-1773`），于是落回本地管线；一个自持索引的 store 可以一跳返回全部结果（fusion/rerank 都在 store 侧做完）。
+   - **[2] 四路取回**：`retrieve_all_fact_types_parallel`（:9409）→ 内部先做时间约束提取（CPU，单 worker 线程，`retrieval.py:159-179`），再把整个召回交给 store 的唯一接口 `recall_unified`（`retrieval.py:181-209`）。Postgres 实现见 2.3。
+   - 跨 fact_type 合并四路列表并各自按分数排序（:9448-9484）；可选 per-source 截断（:9486-9506，默认关）。
+   - **[3] 融合**：`reciprocal_rank_fusion`（默认）或 `interleave_fusion`（consolidation 去重专用），3 或 4 个列表取决于时间窗是否存在（:9693-9723）。
+   - **[4] 重排**：RRF 分数预过滤到 `reranker_max_candidates`（:9757-9770，超上限时按 `boosted_rrf_score` 排序截尾；未超则原样放行）；`hydrate_results` 惰性补全候选正文（:9794-9812）；cross-encoder 打分（:9826）或 rrf/interleave 直通（:9832-9847）。
+   - **[4.6] 合成评分**：`apply_combined_scoring` —— `CE × recency_boost × temporal_boost × proof_count_boost`（:9888-9895；公式见 3.7）；**[4.7] 策略加成**（可选，:9896-9909）；按 `weight` 重排。
+   - **[4.9] min_scores 后置过滤**（reranker/final 门，:9919-9937；0.10.2 线内 #5232 起，主 reranker 按**名次**打分（TypeSafe，`RANK_SCORE_PROVIDERS`）时 `min_scores.reranker` 在 recall 入口即被 HTTP 400 拒绝，:8817-8830——名次分里"top 恒为 1.0"，一个下限只会保留固定比例的结果、与相关度无关；若 failover 链事后落到名次分成员，则该门被**跳过**并记日志（"ignored"，:9922-9928），且响应里不再发 reranker 分，见 2.4）；**[4.8] prefer_observations 去重**（观察压过其来源原始事实，:9970-10030）。
+   - **[5] 截断**到 `thinking_budget × 2`（:10032-10035；源注释未论证为何是 2 倍）。
+   - **[5.5] chunks 抓取**（独立于 max_tokens，:10037-10162；0.10.2 起（#5030）会按请求的 tag 过滤丢弃"文档本身打了读者不可见标签"的 chunk——一条 fact 可见不等于其来源文档可见，判定收拢在 `engine/source_scope.py`，缺文档/无文档的 chunk 默默失败）。
+   - **[6] token 预算过滤** `select_facts_within_budget`（:10167-10193）。
+   - 实体装配、`RecallScores` 组装（:10395-10403）、trace 终结（:10487）。
 
 ### 2.2 数据流机制图（四路取回 + 融合，逻辑视图）
 
@@ -197,7 +197,7 @@ return {
 
 - **"并行"的准确含义**：semantic+BM25 是同一条 UNION SQL，两臂的并行发生在 Postgres 执行器内部；temporal 在**同一连接上串行**于其后；图臂在连接释放后按 fact_type 用 `asyncio.gather` 真并行。模块 docstring 声称的 "4-way parallel search"（`retrieval.py:1-8`）是逻辑分层，不是四个并发任务。
 - **连接纪律**：asyncpg 不允许同一连接上并发查询，所以 dense（即 semantic 向量路）+temporal 共用一个连接顺序执行，图臂另开连接——方法 docstring 明说这复刻了统一接口之前的编排，结果"byte-identical"（`postgres.py:147-151`）。
-- **失败传播**：`asyncio.gather` 默认 fail-fast——某个 fact_type 的图查询抛异常会中断整个 gather，异常向上传到 `recall_async` 的重试层；只有连接类错误才重试（指数退避），其余直接失败（`memory_engine.py:8978-8985`）。臂级别的容错只在臂内部实现（图臂超时降级、时间解析降级、Oracle Text 降级），不存在"一路失败取其它路"的聚合语义。
+- **失败传播**：`asyncio.gather` 默认 fail-fast——某个 fact_type 的图查询抛异常会中断整个 gather，异常向上传到 `recall_async` 的重试层；只有连接类错误才重试（指数退避），其余直接失败（`memory_engine.py:8994-9001`）。臂级别的容错只在臂内部实现（图臂超时降级、时间解析降级、Oracle Text 降级），不存在"一路失败取其它路"的聚合语义。
 - **`RecallArms`**（`memories/base.py:732`）是接口契约：`{fact_type: RecallArms(semantic, bm25, graph, temporal)}`，四臂候选未融合返回，"RRF/rerank happen downstream"（:735 的 docstring 原话）。
 
 ### 2.4 返回结构：一条结果带哪些分数
@@ -216,7 +216,7 @@ scores_by_id: dict[str, RecallScores] = {
 }
 ```
 
-（`memory_engine.py:10369-10377`。）逐点：`final` 是排序依据（合成评分后的 weight）；`reranker` 在直通模式（rrf/interleave 或 passthrough CE）下为 null——因为那时它的 CE 分是名次推导的占位符而非真实相关度（:10362-10368 注释）；`semantic`/`keyword` 来自 RRF 时的 `ArmScores`，该结果未被某臂命中时为 null（`types.py:134-146`）。这个四元组就是 `min_scores` 四个门的过滤对象。
+（`memory_engine.py:10395-10403`。）逐点：`final` 是排序依据（合成评分后的 weight）；`reranker` 在直通模式（rrf/interleave 或 passthrough CE）下为 null——因为那时它的 CE 分是名次推导的占位符而非真实相关度（:10385-10391 注释）；0.10.2 线内 #5232 起，主 provider 按**名次**打分的 reranker（TypeSafe，`RANK_SCORE_PROVIDERS`，`cross_encoder.py:72-77`）同样发 null——名次占位分既不可跨 recall 比较、又会让 `min_scores.reranker` 语义失真，故与 passthrough 一致对待（:10392-10394 的 `reranker_passthrough` 判定）；`semantic`/`keyword` 来自 RRF 时的 `ArmScores`，该结果未被某臂命中时为 null（`types.py:134-146`）。这个四元组就是 `min_scores` 四个门的过滤对象。
 
 ### 2.5 贯穿例子（示例）：查询"用户对 PostgreSQL 的看法"
 
@@ -259,16 +259,16 @@ scores_by_id: dict[str, RecallScores] = {
 
 与 2.5 同一个 bank，唯一区别是查询带时段词。
 
-**步骤 1 — 时间提取**：`analyze()` 先跑 `extract_period`（"last week"/"上周" 属于时段表达，返回区间而非单日）。假设 `question_date=2026-10-02`（示例），得 `temporal_constraint = (2026-09-21 00:00, 2026-09-27 23:59:59.999)`（示例）。这个窗口被传给 `recall_unified` 的 `temporal_window`（`retrieval.py:198`），时间臂整条激活；其余三臂照常运行——**窗口是排名信号不是过滤器**（`response_models.py:314-330` 的 docstring 明说：窗口外的记忆仍会被另外三臂召回）。
+**步骤 1 — 时间提取**：`analyze()` 先跑 `extract_period`（"last week"/"上周" 属于时段表达，返回区间而非单日）。假设 `question_date=2026-10-02`（示例），得 `temporal_constraint = (2026-09-21 00:00, 2026-09-27 23:59:59.999)`（示例）。这个窗口被传给 `recall_unified` 的 `temporal_window`（`retrieval.py:198`），时间臂整条激活；其余三臂照常运行——**窗口是排名信号不是过滤器**（`response_models.py:316-332` 的 docstring 明说：窗口外的记忆仍会被另外三臂召回）。
 
 **步骤 2 — 时间臂内部**（示例）：
 
 1. 入口点 SQL：找时间与 [09-21, 09-27] 相交、`similarity >= 0.1` 的单元，每类型取相似度前 60（pool）；假设 world 类型命中 25 条（示例）。
 2. 覆盖度选择：窗口 7 天切成 8 桶（约每桶 21 小时），25 条按桶轮转取 10 个入口点——假设周一/周三/周五各贡献若干条，而不是全部取相似度最高的周一聚类（示例）。
-3. 每个入口点的时间邻近度 `temporal_proximity = 1 - min(|date - window_mid| / (total_days/2), 1)`：窗口中点的条目得 1.0，边缘得趋近 0，无日期的入口点给中性 0.5（`recall.py:549-555`）。
-4. 扩散：从 10 个入口点沿 temporal/causal 边走，预算 300 扣减；假设邻居 n1 经一条 `weight=0.8` 的 temporal 边从入口点 e（proximity=0.9）到达：`propagated = 0.9 × 0.8 × 1.0 × 0.7 = 0.504`，若 n1 自身 proximity 只有 0.2，则其 `temporal_score = max(0.2, 0.504) = 0.504`（示例）。
+3. 每个入口点的时间邻近度 `temporal_proximity = 1 - min(|date - window_mid| / (total_days/2), 1)`：窗口中点的条目得 1.0，边缘得趋近 0，无日期的入口点给中性 0.5（`recall.py:565-572`）。
+4. 扩散：从 10 个入口点沿 temporal/causal 边走，预算 300 扣减；假设邻居 n1 经一条 `weight=0.8` 的 temporal 边从入口点 e 到达：`propagated = 1.0 × 0.8 × 0.7 = 0.56`，若 n1 自身 proximity 只有 0.2，则其 `temporal_score = max(0.2, 0.56) = 0.56`（示例）。**父分不是入口点自身的 proximity**：入口点以满强 1.0 进入传播（`recall.py:578` 把 `(similarity, 1.0)` 写进 `node_scores`，:546 取元组第二位相乘），e 自己的 proximity=0.9 只体现在它本人的 `temporal_score` 上，不作为传播起点强度。
 
-**步骤 3 — 融合时**：这次 `result_lists` 是 4 个（temporal 非空，`memory_engine.py:9694-9696`）。假设 world-w（"用户吐槽过 PostgreSQL 的内存占用"）恰好 mentioned_at 落在窗口内且与入口点有 temporal 边，它就多拿一份 `1/(60+rank_temporal)`，RRF 分进一步上抬——单看语义/词面它只是个中游候选，时间维把它顶了上去。这就是"时间窗是排名信号"的具体形态。
+**步骤 3 — 融合时**：这次 `result_lists` 是 4 个（temporal 非空，`memory_engine.py:9710-9712`）。假设 world-w（"用户吐槽过 PostgreSQL 的内存占用"）恰好 mentioned_at 落在窗口内且与入口点有 temporal 边，它就多拿一份 `1/(60+rank_temporal)`，RRF 分进一步上抬——单看语义/词面它只是个中游候选，时间维把它顶了上去。这就是"时间窗是排名信号"的具体形态。
 
 对照结论（示例对比，非实测）：2.5 的无时间查询里 temporal 臂整体缺席（融合列表为 3 个、内部候选的 `temporal_score` 为 null——注意 HTTP 响应的 `RecallResult`（`api/http.py:552-616`）与 `RecallScores` 四元组都没有 temporal_score 字段，它只存在于内部 `RetrievalResult`（`types.py`）与 trace 中）；2.6 里它成为第四个投票者。两次调用共用同一套融合/重排代码，差别只在 `result_lists` 的长度。
 
@@ -379,7 +379,7 @@ sorted_ids = sorted(score_map.keys(), key=lambda x: score_map[x], reverse=True)[
 
 逐点：实体分用 `tanh(count×0.5)` 把共享实体数压到 [0,1]（1 个→0.46，2 个→0.76，3 个→0.91，自然饱和，注释 ：235-238）；三信号**加法合成分 ∈ [0,3]**，多信号汇合的事实天然靠前；总分截断到 `budget`（=thinking_budget）；最终分数写进 `result.activation`，供跨 fact_type 合并后重排（:274-279 的注释解释了为什么不能只保留单一信号的原始分）。
 
-**observation 的特殊性**（:373-431）：观察是 consolidation 产物，没有直接实体链；改为 `seed → 来源事实 → 实体 → 其它 world 事实 → 它们的观察` 的间接遍历，且三种信号融合进同一条 CTE（#3857，一次往返）。**方言差异**：PG 走 `memory_units.source_memory_ids` 数组列——`engine/db/ops_postgresql.py:83-84` 的 `uses_observation_sources_table = False`（注释"PG uses native array ops on source_memory_ids"），实现里 `unnest(source_memory_ids)`（:1113 起，另有对 `@>` GIN 的逐源探测优化，#4715）；`observation_sources` 结对表是 **Oracle 专属**（基类契约默认 True，`db/ops.py:346-352`；:612-623 的 docstring 原话 "PG uses native array ops (source_memory_ids column) for performance. Oracle uses the observation_sources junction table"）。注意 `link_expansion.py:418-420` 处 "Both backends now use the observation_sources junction table" 的注释是过时残留，勿被误导——它下方法行调用的 `ops.expand_observations` 在 PG 侧就是走数组列。
+**observation 的特殊性**（:373-444）：观察是 consolidation 产物，没有直接实体链；改为 `seed → 来源事实 → 实体 → 其它 world 事实 → 它们的观察` 的间接遍历，且三种信号融合进同一条 CTE（#3857，一次往返）。**超时语义与非观察臂不同**（0.10.2 线内 #5231）：`ops.expand_observations` 同样套 `asyncio.wait_for(config.link_expansion_timeout)`，但三信号已熔在一条查询里、没有"退回 semantic+causal"的便宜回退——超时记 warning 后该类型图信号整体返回空，recall 继续走其余策略（:423-444）。**方言差异**：PG 走 `memory_units.source_memory_ids` 数组列——`engine/db/ops_postgresql.py:83-84` 的 `uses_observation_sources_table = False`（注释"PG uses native array ops on source_memory_ids"），实现里 `unnest(source_memory_ids)`（:1113 起，另有对 `@>` GIN 的逐源探测优化，#4715）；`observation_sources` 结对表是 **Oracle 专属**（基类契约默认 True，`db/ops.py:346-352`；:612-623 的 docstring 原话 "PG uses native array ops (source_memory_ids column) for performance. Oracle uses the observation_sources junction table"）。注意 `link_expansion.py:418-420` 处 "Both backends now use the observation_sources junction table" 的注释是过时残留，勿被误导——它下方法行调用的 `ops.expand_observations` 在 PG 侧就是走数组列。
 
 ### 3.4 时间臂：从自然语言到扩散图（必答问题 5）
 
@@ -410,10 +410,10 @@ if token_set & _PERIOD_WORDS:
 - **中文专门处理**（`engine/chinese_temporal_periods.py`）：dateparser 对中文时段（"上个月""三个月内""去年"）经常返回 None 或单日窗口，于是有一套独立的中文规则：繁简归一化（週→周 等，:16-19）、中文数字解析（`parse_chinese_number`，:171）、"一个/个" 可选量词、后缀字符白名单判断（:20-73）；`extract_chinese_period`（:97）在 `analyze()` 里先于 dateparser 执行。解析失败的兜底："十万年前" 曾让 dateparser 算出公元前年份并打挂整个 bank 的 recall（issue #3217，`temporal_extraction.py:100-115`），所以入口处 try/except 降级为"无时间约束"。
 - 另有 `TransformerQueryAnalyzer`（:470-722）：规则先行（yesterday/last week/June 2024 等正则覆盖 90%+），兜底用 flan-t5-small 生成 "YYYY-MM-DD to YYYY-MM-DD"。当前 recall 主路径用的是 Dateparser 版（`temporal_extraction.py:75` 的默认）。
 
-**第二步：入口点选择 + 扩散**（`memories/pg/recall.py:368-695`，仅当窗口存在）：
+**第二步：入口点选择 + 扩散**（`memories/pg/recall.py:374-714`，仅当窗口存在）：
 
-- 入口点 SQL（:471-496）：每个 fact_type 一条子臂，条件是**时间与窗口相交**（occurred 区间重叠或 mentioned_at 落窗内）且 `similarity >= 0.1`（`temporal_semantic_min_similarity`，`config.py:1311`），按向量距离排序取 pool 60 条（`_TEMPORAL_POOL_SIZE`，:309）。注释（:449-457）记载了旧版"按最近取 50"的两个坑：偏向窗口末端、日期退化时变成近乎随机的全表扫描排序（66 万行 bank 上 30s+）。
-- **覆盖度选择** `_select_with_temporal_coverage`（:319-365）：
+- 入口点 SQL（:477-502）：每个 fact_type 一条子臂，条件是**时间与窗口相交**（occurred 区间重叠或 mentioned_at 落窗内）且 `similarity >= 0.1`（`temporal_semantic_min_similarity`，`config.py:1311`），按向量距离排序取 pool 60 条（`_TEMPORAL_POOL_SIZE`，:309）。注释（:455-463）记载了旧版"按最近取 50"的两个坑：偏向窗口末端、日期退化时变成近乎随机的全表扫描排序（66 万行 bank 上 30s+）。
+- **覆盖度选择** `_select_with_temporal_coverage`（:325-371）：
 
 ```python
 def _bucket(row: Any) -> int:
@@ -438,22 +438,22 @@ while len(selected) < limit and any(len(b) > tier for b in buckets.values()):
     tier += 1
 ```
 
-逐点：窗口切成 8 桶（`_TEMPORAL_COVERAGE_BUCKETS`），轮转从每个桶取第 1 相似者、再第 2 相似者……凑满 10 个入口点（`_TEMPORAL_ENTRY_POINTS`）——让入口点铺满窗口的时间跨度而不是扎堆在相似度最高的一小段；日期退化（全部落在同一桶）时自然退化为纯相似度序（docstring :328-334）。
-- **扩散**（:596-691）：BFS 沿 `temporal/causes/caused_by/enables/prevents` 边（weight≥0.1，LATERAL 每源节点取 top-10 邻居），预算 `budget`（=thinking_budget）扣减，最多 5 轮迭代、每批 20 个节点。邻居的时间分传播公式：
+逐点：窗口切成 8 桶（`_TEMPORAL_COVERAGE_BUCKETS`），轮转从每个桶取第 1 相似者、再第 2 相似者……凑满 10 个入口点（`_TEMPORAL_ENTRY_POINTS`）——让入口点铺满窗口的时间跨度而不是扎堆在相似度最高的一小段；日期退化（全部落在同一桶）时自然退化为纯相似度序（docstring :334-340）。
+- **扩散**（:612-712）：BFS 沿 `temporal/causes/caused_by/enables/prevents` 边（weight≥0.1，LATERAL 每源节点取 top-10 邻居，SQL 在 :629-660），预算 `budget`（=thinking_budget）扣减，最多 5 轮迭代、每批 20 个节点。邻居的时间分传播公式（0.10.2 线内 #5237 重构）抽成了常量与闭包：
 
 ```python
-if link_type in ("causes", "caused_by"):
-    causal_boost = 2.0
-elif link_type in ("enables", "prevents"):
-    causal_boost = 1.5
-else:
-    causal_boost = 1.0
+_CAUSAL_BOOST = {"causes": 2.0, "caused_by": 2.0, "enables": 1.5, "prevents": 1.5}
+_TEMPORAL_DECAY = 0.7  # per-hop decay on a propagated temporal score
 
-propagated_temporal = parent_temporal_score * n["weight"] * causal_boost * 0.7
-combined_temporal = max(neighbor_temporal_proximity, propagated_temporal)
+def propagated_temporal(link_row, scores=node_scores):
+    _, parent_temporal_score = scores.get(str(link_row["from_unit_id"]), (0.5, 0.5))
+    boost = _CAUSAL_BOOST.get(link_row["link_type"], 1.0)
+    return parent_temporal_score * link_row["weight"] * boost * _TEMPORAL_DECAY
+
+combined_temporal = max(neighbor_temporal_proximity, propagated_temporal(n))
 ```
 
-（`recall.py:670-679`。）即：邻居的时间分 = max(自身时间邻近度, 父节点分×链权重×因果加成×0.7 衰减)。因果链（2.0）比使能/阻止链（1.5）和时间链（1.0）传得更远；`combined_temporal <= 0.2` 的邻居不再作为前沿继续扩散（:686）。`created_after/created_before` 的 **updated_at 窗口**在扩散 SQL 里重复施加（`recall.py:581-588` 的 `spreading_window = UpdatedWindow(after=created_after, before=created_before)`，注释：否则入口点会把窗外邻居拽进结果）；**时间窗本身不约束扩散邻居**——扩散 SQL（:612-637）不含任何 start_date/end_date 谓词，窗外邻居靠 `combined_temporal` 排名自然沉底（与 2.6 的"窗口是排名信号不是过滤器"一致）。Oracle 无 `unnest`，扩散整个跳过、只留入口点（:590-594）。
+（`recall.py:313-317` 的常量、:539-553 的闭包、:699 的合成。）即：邻居的时间分 = max(自身时间邻近度, 父节点分×链权重×因果加成×0.7 衰减)。因果链（2.0）比使能/阻止链（1.5）和时间链（1.0）传得更远。注意父分的来源：**入口点以满强 1.0 进入传播**（`recall.py:578` 的 `node_scores[unit_id] = (similarity, 1.0)`，:546 取元组第二位），入口点自身的 proximity 只体现在它本人的 `temporal_score` 上；只有扩散中过的节点才以自己算得的 `combined_temporal` 充当后续跳的父分（:707）。**多链同目标取最强（#5237）**：同一个目标可以从同一父节点经多条合格边到达（例如一条 `temporal` 边 + 一条 `caused_by` 边）——扩展 SQL 无 ORDER BY，"取先到的一行"会让目标得分、乃至它能否越过 :706 的续扩散阈值，取决于查询计划。现在先把每个目标按**传播分**保留最强的一条路径（:663-671；只按传播部分排名即可，目标的自身日期邻近度在各行相同、不影响胜负），再按传播分**降序**处理目标（:674-675），使 `budget_remaining <= 0` 的截断淘汰的是最弱目标而不是规划器恰好后返回的那些。`combined_temporal <= 0.2` 的邻居不再作为前沿继续扩散（:706）。`created_after/created_before` 的 **updated_at 窗口**在扩散 SQL 里重复施加（`recall.py:598-605` 的 `spreading_window = UpdatedWindow(after=created_after, before=created_before)`，注释：否则入口点会把窗外邻居拽进结果）；**时间窗本身不约束扩散邻居**——扩散 SQL（:629-660）不含任何 start_date/end_date 谓词，窗外邻居靠 `combined_temporal` 排名自然沉底（与 2.6 的"窗口是排名信号不是过滤器"一致）。Oracle 无 `unnest`，扩散整个跳过、只留入口点（:606-612）。
 
 ### 3.5 RRF 融合与每臂上限（必答问题 3 汇总）
 
@@ -484,12 +484,12 @@ for source_idx, results in enumerate(result_lists):
 
 逐点讲解：
 
-- **公式**：`score(d) = Σ_lists 1/(k + rank)`，`k` 默认 60（`fusion.py:29` 签名默认值；调用处 `memory_engine.py:9697-9698` 只传列表不传 k，故生产 k=60）。rank 从 1 起（`enumerate(results, start=1)`）。
+- **公式**：`score(d) = Σ_lists 1/(k + rank)`，`k` 默认 60（`fusion.py:29` 签名默认值；调用处 `memory_engine.py:9713-9714` 只传列表不传 k，故生产 k=60）。rank 从 1 起（`enumerate(results, start=1)`）。
 - **并列去重**：同一文档被多臂命中时保留**首次出现**的 `RetrievalResult`（:76-77）——result_lists 按语义→bm25→图→时间的固定顺序遍历，文档在更靠前的列表里出现过就保留那一臂的行（与它在各臂的名次无关）；各臂名次另记入 `source_ranks`、原始分记入 `arm_scores`。
-- **`ArmScores` 兜底**：因为只保留首次出现的行，行的分数字段只反映一臂；`arm_scores` 把每个臂的原始分数（semantic 相似度 / bm25 分）单独记账，最终随 `RecallScores` 返回（`types.py:134-146`；`memory_engine.py:10369-10377`）。
+- **`ArmScores` 兜底**：因为只保留首次出现的行，行的分数字段只反映一臂；`arm_scores` 把每个臂的原始分数（semantic 相似度 / bm25 分）单独记账，最终随 `RecallScores` 返回（`types.py:134-146`；`memory_engine.py:10395-10403`）。
 - **`source_ranks`**：`{"semantic_rank": r1, "bm25_rank": r2, ...}`——策略 boost、trace、interleave 全靠它。
-- **interleave 变体**（`fusion.py:112-176`）：轮转取每臂第 1 名、再第 2 名……`rrf_score` 被赋成按位置递减的伪分数（`float(n - pos)`，:170）以兼容下游按分排序。仅 consolidation 去重 recall 显式指定（`reranking="interleave"`，`consolidator.py:3021`），且在合成评分处被特别跳过以保序（`memory_engine.py:9856-9863`）。
-- **上限链**（每臂 → 全局）：每臂每类型 ≤ `thinking_budget`（fixed mid=300）→ 可选 `recall_max_candidates_per_source`（默认 0 关闭，`config.py:1332`）→ RRF 合并池 → `reranker_max_candidates=300` 预过滤（`memory_engine.py:9741-9754`）→ 重排后截断 `thinking_budget×2`（:10010）→ token 预算。
+- **interleave 变体**（`fusion.py:112-176`）：轮转取每臂第 1 名、再第 2 名……`rrf_score` 被赋成按位置递减的伪分数（`float(n - pos)`，:170）以兼容下游按分排序。仅 consolidation 去重 recall 显式指定（`reranking="interleave"`，`consolidator.py:3031`），且在合成评分处被特别跳过以保序（`memory_engine.py:9872-9879`）。
+- **上限链**（每臂 → 全局）：每臂每类型 ≤ `thinking_budget`（fixed mid=300）→ 可选 `recall_max_candidates_per_source`（默认 0 关闭，`config.py:1332`）→ RRF 合并池 → `reranker_max_candidates=300` 预过滤（`memory_engine.py:9757-9770`）→ 重排后截断 `thinking_budget×2`（:10033）→ token 预算。
 
 ### 3.6 Reranker：输入、输出与默认（必答问题 4）
 
@@ -526,10 +526,10 @@ scores = await self.cross_encoder.predict([(a, b) for a, b in pairs])
 
 - **喂日期给 cross-encoder 是显式的时序感知设计**：ISO 与人类可读两种格式前置，让模型能利用绝对时间做相关性判断（例如"2022 年的会议" vs 查询里的时间锚点）。
 - **归一化分叉**（:431-452）：分数全体已在 [0,1]（Cohere/Jina 等校准过的 API reranker 返回 calibrated relevance_score）则原样保留**绝对置信度**——注释强调 rank 归一化会把 0.007 的 top 候选膨胀成 1.0，抹掉弃答信号；本地模型输出 logits 才用 sigmoid（:439-449）。NaN 清洗为 0.0（:455-462）。
-- **默认 provider**：`local`（sentence-transformers 本地模型，默认 `cross-encoder/ms-marco-MiniLM-L-6-v2`，`config.py:1273-1277`）；另有 tei/cohere/flashrank/jina-mlx/litellm/google/alibaba/siliconflow/zeroentropy 等十余种（`engine/cross_encoder.py` 的类清单）。provider 矩阵属于 M5 任务，此处只取接口面：`CrossEncoderModel` ABC 暴露 `provider_name`、`predict(pairs)` 与 `prunes_candidates` 标志（`cross_encoder.py:93-143`）。
-- **进程内 rerank 的墙钟上限**（#4696，0.10.2 新增）：本地模型分批打分、**批间**检查 deadline（批内不中断——已在 torch 前向里的调用无法从事件循环取消，`cross_encoder.py:352-380`），超时抛 `RerankTimeoutError` 携带已得分数；`rerank` 捕获后把未打分候选记 0.0（**不是** sigmoid(0)=0.5，避免冒充通过 min_reranker_score 门的"弱分"）、按原 RRF 序排在已打分者之后（`reranking.py:413-430, 464-483`）——宁可降级到 RRF 序也不让一次误配的本地模型把 recall 挂死。上限 `reranker_local_timeout` 默认 300s（远高于健康值，是阀门不是延迟目标），0 关闭（`config.py:1281-1289`）。
-- **prunes_candidates 语义**：个别 reranker（如 TypeSafe 可配 prune）对不相关候选回 0.0，`rerank` 末尾把 weight==0 的剔除（:485-497）——"judges relevance rather than only ordering it"。
-- **关闭 reranker 时**：bank 级 `enable_reranking=false` 把默认 `cross_encoder` 策略降级为 `"rrf"`（`memory_engine.py:1651-1660`）；此时跳过 CE 调用，直接按 RRF 序构造 `ScoredResult`（cross_encoder_score=0.0，:9816-9831）；随后的 `apply_combined_scoring` 检测到 passthrough（passthrough CE：不产生真实相关度分数的重排序器——包括显式 rrf/interleave 直通、failover 链中实际应答的是 rrf 成员、以及返回恒定分数的 CE；判定见 `recall_boost.py:198-207` 的 `stage2_passthrough`），用 RRF 名次线性映射出 [0.1, 1.0] 的伪 CE 分（`reranking.py:250-261`）——否则乘法 boost 会变成唯一的排序信号，最终排序退化为纯新鲜度排序（注释 ：227-249）。响应里 `scores.reranker` 为 null（`memory_engine.py:10362-10377`）。
+- **默认 provider**：`local`（sentence-transformers 本地模型，默认 `cross-encoder/ms-marco-MiniLM-L-6-v2`，`config.py:1273-1277`）；另有 tei/cohere/flashrank/jina-mlx/litellm/google/alibaba/siliconflow/zeroentropy 等十余种（`engine/cross_encoder.py` 的类清单）。provider 矩阵属于 M5 任务，此处只取接口面：`CrossEncoderModel` ABC 暴露 `provider_name`、`predict(pairs)` 与 `prunes_candidates` 标志（`cross_encoder.py:100-150`）。
+- **进程内 rerank 的墙钟上限**（#4696，0.10.2 新增）：本地模型分批打分、**批间**检查 deadline（批内不中断——已在 torch 前向里的调用无法从事件循环取消，`cross_encoder.py:364-392`），超时抛 `RerankTimeoutError` 携带已得分数；`rerank` 捕获后把未打分候选记 0.0（**不是** sigmoid(0)=0.5，避免冒充通过 min_reranker_score 门的"弱分"）、按原 RRF 序排在已打分者之后（`reranking.py:413-430, 464-483`）——宁可降级到 RRF 序也不让一次误配的本地模型把 recall 挂死。上限 `reranker_local_timeout` 默认 300s（远高于健康值，是阀门不是延迟目标），0 关闭（`config.py:1281-1289`）。
+- **prunes_candidates 语义**：个别 reranker（如 TypeSafe 可配 prune）对不相关候选回 0.0，`rerank` 末尾把 weight==0 的剔除（:485-497）——"judges relevance rather than only ordering it"。0.10.2 线内 #5232/#4901 给 TypeSafe 补了一条定性：它的分数是**候选在当次池内的名次**（top 恒为 1.0），不是逐对相关度——`RANK_SCORE_PROVIDERS = frozenset({"typesafe"})`（`cross_encoder.py:72-77`）被 recall 入口用来拒绝 `min_scores.reranker`、在响应里不发 reranker 分（见 2.4/3.7）。
+- **关闭 reranker 时**：bank 级 `enable_reranking=false` 把默认 `cross_encoder` 策略降级为 `"rrf"`（`memory_engine.py:1651-1660`）；此时跳过 CE 调用，直接按 RRF 序构造 `ScoredResult`（cross_encoder_score=0.0，:9832-9847）；随后的 `apply_combined_scoring` 检测到 passthrough（passthrough CE：不产生真实相关度分数的重排序器——包括显式 rrf/interleave 直通、failover 链中实际应答的是 rrf 成员、以及返回恒定分数的 CE；判定见 `recall_boost.py:198-207` 的 `stage2_passthrough`），用 RRF 名次线性映射出 [0.1, 1.0] 的伪 CE 分（`reranking.py:250-261`）——否则乘法 boost 会变成唯一的排序信号，最终排序退化为纯新鲜度排序（注释 ：227-249）。响应里 `scores.reranker` 为 null（`memory_engine.py:10385-10403`）。
 
 ### 3.7 合成评分与召回 Boost（α 家族与两级策略加成）
 
@@ -546,42 +546,42 @@ combined_score    = CE_normalized * recency_boost * temporal_boost * proof_count
 - **粗粒度日期的诚实处理**（:100-171，issue #3893）："2026 年的峰会"存成 2026-01-01 的整年 span，同年 8 月看它已被"陈旧"了 8 个月——这个年龄是从 span 起点 aging 凭空发明的（原文只说到年，哪一天发生并不知道）。对策：识别"恰好一个日历月/年"的 span（容差 86400s（一天），:93/:113-120），从**span 末端**计龄且封顶在中性 0.5——"我们不知道在这个期间的哪一天"，但 2015 年照样该衰减。
 - **proof_count**（仅 observation）：`proof_norm = 0.5 + ln(proof_count)/10`，clamp [0,1]，最多 ±5%（:284-294）。
 - **策略 boost**（`recall_boost.py`）两级，由 `HINDSIGHT_API_RECALL_STRATEGY_BOOSTS`（如 `graph:high`）触发，默认空（`config.py:1336`）：
-  - **rank 空间（重排预过滤前）**：`boosted_rrf_score` 把被 boost 臂的贡献改写为 `1/(k + rank/divisor)`——divisor 2/4/8 对应 low/medium/high（:108-111, :115-141）。docstring（:33-49）论证了为什么不做标准 weighted-RRF：k=60 的分数动态范围只有 5.9 倍（300 候选窗口内 1/61→1/360），任何更大的权重都会让排序退化为"被 boost 臂优先"的字典序，实测 recall@20 从 0.97 崩到 0.40；改成 rank 除法后"臂内第 r 名胜过他臂第 s 名 ⇔ r < divisor×s"——0.10.2 的注释补充了这句话的边界：这是单臂贡献对单臂贡献的比较，多臂求和后不再是融合榜单的整体性质（:47-49）。只在候选池**超过** `reranker_max_candidates` 时才参与截尾排序；池没超限则既不排序也不改写 `rrf_score`（`trim_merged_candidates`，:178-196；`memory_engine.py:9741-9754`）。
-  - **加法（重排后，0.10.2 改为按名次衰减，#4653）**：`additive_strategy_boost` 给最终 weight（~[0,1]）加的 bump 不再是平坦值，而是 `additive × rank_divisor / (rank_divisor + rank − 1)`（rank 是候选在被 boost 臂内的名次，`recall_boost.py:142-170`）：第 1 名拿满档位值 0.05/0.2/0.5，名次越深衰减越多（`high` 到第 9 名已减半，divisor=8），两个臂同时命中则相加、无合并上限。动机不变——补偿"本地 CE 双峰分布把图臂结果压到近 0"的偏差（:85-107 的校准注释）——但旧平坦 bump 对臂内深排名候选给多了、还会无差别重排整个榜单；注释同时坦承这仍是绝对加法，不修复 CE 校准、不保证强直接匹配必胜。直通 recall（显式 rrf 或 failover 到 rrf）跳过此步（`apply_post_rerank_boost`，:209-233；调用处 `memory_engine.py:9880-9893`）。
-- **min_scores 四门**（`response_models.py:265-312`）：`semantic/keyword` 是下推到各自 SQL 臂内的检索级下限（只约束那一臂，图/时间臂进来的结果合法地为 null）；`reranker/final` 是重排后对每条结果的后置谓词（可做"低置信弃答"）。代码位置：SQL 侧 `memories/pg/recall.py:97-101`，后置 `memory_engine.py:9904-9917`。
+  - **rank 空间（重排预过滤前）**：`boosted_rrf_score` 把被 boost 臂的贡献改写为 `1/(k + rank/divisor)`——divisor 2/4/8 对应 low/medium/high（:108-111, :115-141）。docstring（:33-49）论证了为什么不做标准 weighted-RRF：k=60 的分数动态范围只有 5.9 倍（300 候选窗口内 1/61→1/360），任何更大的权重都会让排序退化为"被 boost 臂优先"的字典序，实测 recall@20 从 0.97 崩到 0.40；改成 rank 除法后"臂内第 r 名胜过他臂第 s 名 ⇔ r < divisor×s"——0.10.2 的注释补充了这句话的边界：这是单臂贡献对单臂贡献的比较，多臂求和后不再是融合榜单的整体性质（:47-49）。只在候选池**超过** `reranker_max_candidates` 时才参与截尾排序；池没超限则既不排序也不改写 `rrf_score`（`trim_merged_candidates`，:178-196；`memory_engine.py:9757-9770`）。
+  - **加法（重排后，0.10.2 改为按名次衰减，#4653）**：`additive_strategy_boost` 给最终 weight（~[0,1]）加的 bump 不再是平坦值，而是 `additive × rank_divisor / (rank_divisor + rank − 1)`（rank 是候选在被 boost 臂内的名次，`recall_boost.py:142-170`）：第 1 名拿满档位值 0.05/0.2/0.5，名次越深衰减越多（`high` 到第 9 名已减半，divisor=8），两个臂同时命中则相加、无合并上限。动机不变——补偿"本地 CE 双峰分布把图臂结果压到近 0"的偏差（:85-107 的校准注释）——但旧平坦 bump 对臂内深排名候选给多了、还会无差别重排整个榜单；注释同时坦承这仍是绝对加法，不修复 CE 校准、不保证强直接匹配必胜。直通 recall（显式 rrf 或 failover 到 rrf）跳过此步（`apply_post_rerank_boost`，:209-233；调用处 `memory_engine.py:9896-9909`）。
+- **min_scores 四门**（`response_models.py:265-314`）：`semantic/keyword` 是下推到各自 SQL 臂内的检索级下限（只约束那一臂，图/时间臂进来的结果合法地为 null）；`reranker/final` 是重排后对每条结果的后置谓词（可做"低置信弃答"）。0.10.2 线内 #5232 起 `reranker` 门多一条前置语义：其 docstring 明说"当 reranker 按名次位置打分（TypeSafe）时被 HTTP 400 拒绝"（:303-308）——名次分下限只会保留固定比例的结果。代码位置：SQL 侧 `memories/pg/recall.py:97-101`，入口拒绝与后置过滤 `memory_engine.py:8817-8830, 9919-9937`（failover 落到名次分成员时后置门跳过 reranker 分、照常应用 final 门）。
 
 ### 3.8 追踪（trace）机制
 
 三层观测并行存在：
 
-1. **SearchTracer**（`tracer.py:31`）：每次 recall 都构建（`memory_engine.py:9182-9190`），但 `phases_only = not enable_trace`——阶段耗时（`add_phase_metric`）**总是**采集并转发给 metrics collector（`tracer.py:210-241`），而候选明细（每臂结果、RRF 榜、重排名次变化、entry points、visits）只在 `enable_trace=true` 时构建。`memory_engine.py:9168-9177` 的注释把这条纪律上升为规范："Never guard on `if tracer:`"——曾经三次犯过"tracer 恒存在却按它判空"导致白建 payload 的同一类 bug，有守卫测试 `test_recall_tracer_payload_gating.py` 看门。trace 模型在 `trace.py:149-174`（`SearchTrace`：query/retrieval_results/rrf_merged/reranked/entry_points/visits/summary/final_results），`reranked` 里带 `rank_change`（`tracer.py:342`）方便看重排把谁提上来/压下去。
-2. **OpenTelemetry spans**：`hindsight.recall` 父 span + embedding/retrieval/fusion/rerank 子 span（`memory_engine.py:8907, 9218, 9376, 9685, 9726`）。
+1. **SearchTracer**（`tracer.py:31`）：每次 recall 都构建（`memory_engine.py:9198-9206`），但 `phases_only = not enable_trace`——阶段耗时（`add_phase_metric`）**总是**采集并转发给 metrics collector（`tracer.py:210-241`），而候选明细（每臂结果、RRF 榜、重排名次变化、entry points、visits）只在 `enable_trace=true` 时构建。`memory_engine.py:9184-9193` 的注释把这条纪律上升为规范："Never guard on `if tracer:`"——曾经三次犯过"tracer 恒存在却按它判空"导致白建 payload 的同一类 bug，有守卫测试 `test_recall_tracer_payload_gating.py` 看门。trace 模型在 `trace.py:149-174`（`SearchTrace`：query/retrieval_results/rrf_merged/reranked/entry_points/visits/summary/final_results），`reranked` 里带 `rank_change`（`tracer.py:342`）方便看重排把谁提上来/压下去。
+2. **OpenTelemetry spans**：`hindsight.recall` 父 span + embedding/retrieval/fusion/rerank 子 span（`memory_engine.py:8923, 9234, 9392, 9701, 9742`）。
 3. **recall 阶段直方图**：HTTP 层 `record_recall_phase` 记 `http_to_handler/mw_and_routing/deps_total/body_parse/engine_call/post_engine`（`http.py:6074-6086, 6167, 6259`），外加依赖阶段 `dep_auth/dep_precheck`（`http.py:5474-5494`）——注意 `[RECALL HTTP]` 慢日志行里的 `pre/recall/post` 三段（:6264 起）只是日志标签，不是阶段名；引擎内 `record_recall_phase` 记录 `bank_config/fuzzy_tags/semaphore_acquire/parallel_retrieval/rrf_merge/reranking/combined_scoring/token_filtering/...`（抽查：`parallel_retrieval` 见 `memory_engine.py:9660`、`rrf_merge` :9720、`token_filtering` :10161）——动机写在注释里：在满载的系统上，此前已有的阶段只覆盖一次 recall 墙钟的 10%（其余 90% 都是真实的 await）——所以引擎内每个未计时的 await 都是插桩候选（`memory_engine.py:8759-8762`）。
 4. **`memories_backend` 标签**（#5129，0.10.2 新增，opt-in）：operation 与 recall-phase 两族直方图可选携带 `memories_backend` 标签，用于多 memories store 混部时对比各后端延迟。store 侧接口是 `backend_name_for(bank_id)`（`memories/base.py:1076-1085`，默认返回空串=不贴标签，保证存量序列不因加标签而断史；路由型 store 按银行覆写它）。`record_operation` 在操作开始时解析一次并写入 ContextVar（`metrics.py:49, 715-743`），操作内记录的 recall phase 经上下文继承同一标签，无需把 bank_id 穿透到每个 phase 调用点；解析失败一律降级为无标签，不让指标影响请求。
 
 ### 3.9 tags 过滤与模糊解析（简）
 
-四条臂的 SQL 都拼同样的 tags 谓词：`any/any_strict` 用 `&&`（overlap）、`all/all_strict` 用 `@>`（contains）、`exact` 是 `@> AND <@`（集合相等）（`tags.py:46, 75-87`）；any/all 默认包含未打标行——机制是子句再 OR 上 `tags IS NULL OR tags = '{}'`（`tags.py:186-189`，simple 版 ：235-237）。`tag_groups` 支持嵌套 and/or/not 布尔组合；`resolve="fuzzy"` 的叶子在进 SQL 前被 `tag_resolution.py` 用 trigram 相似度（阈值 0.45，`MIN_SIMILARITY` 在 ：50）重写成精确叶子——词表超过 5000 直接 422 拒绝而不是悄悄截断（`tag_resolution.py:56`，`MAX_VOCABULARY = 5000`）。0.10.2 起 trigram 相似度抽成独立模块 `engine/trigram.py`（内存版 pg_trgm `similarity()`，#3107 校准为与 Postgres 逐字节一致），由实体解析与模糊 tag 匹配**共用**（`tag_resolution.py:44`），保证"相似名"只有一种定义。这就是 `memory_engine.py:8870` 在构建 SQL 前做 `_resolve_fuzzy_tag_groups` 的原因。同版本还加了**按调用方的 tag scope**（#5032/#5048）：recall 在校验器之后把调用方被授予的 scope 以 `tag_groups` 形式 AND 进过滤（`memory_engine.py:8852-8856`），共享 bank 的读者只能把视野收窄、不能放大；配套的 `strict_tags_match`/`tags_satisfy_groups`/`tags_writable` 等助手都在 `tags.py`。
+四条臂的 SQL 都拼同样的 tags 谓词：`any/any_strict` 用 `&&`（overlap）、`all/all_strict` 用 `@>`（contains）、`exact` 是 `@> AND <@`（集合相等）（`tags.py:46, 75-87`）；any/all 默认包含未打标行——机制是子句再 OR 上 `tags IS NULL OR tags = '{}'`（`tags.py:186-189`，simple 版 ：235-237）。`tag_groups` 支持嵌套 and/or/not 布尔组合；`resolve="fuzzy"` 的叶子在进 SQL 前被 `tag_resolution.py` 用 trigram 相似度（阈值 0.45，`MIN_SIMILARITY` 在 ：50）重写成精确叶子——词表超过 5000 直接 422 拒绝而不是悄悄截断（`tag_resolution.py:56`，`MAX_VOCABULARY = 5000`）。0.10.2 起 trigram 相似度抽成独立模块 `engine/trigram.py`（内存版 pg_trgm `similarity()`，#3107 校准为与 Postgres 逐字节一致），由实体解析与模糊 tag 匹配**共用**（`tag_resolution.py:44`），保证"相似名"只有一种定义。这就是 `memory_engine.py:8886` 在构建 SQL 前做 `_resolve_fuzzy_tag_groups` 的原因。同版本还加了**按调用方的 tag scope**（#5032/#5048）：recall 在校验器之后把调用方被授予的 scope 以 `tag_groups` 形式 AND 进过滤（`memory_engine.py:8868-8872`），共享 bank 的读者只能把视野收窄、不能放大；配套的 `strict_tags_match`/`tags_satisfy_groups`/`tags_writable` 等助手都在 `tags.py`。
 
 ### 3.10 缓存与优化手段清单（必答问题 6）
 
 recall 路径上没有传统意义的"结果缓存"，但优化密度很高：
 
-1. **索引层**：每 `(bank, fact_type)` 部分 HNSW（3.1，store-owned bank 除外）；`search_vector` GIN / 扩展 BM25 索引（3.2）；`memory_links` 的 `(from_unit_id, link_type, weight DESC)` 复合索引供 LATERAL 早停（`memories/pg/recall.py:567-570` 注释、`link_expansion.py:317-322`）；`unit_entities` 的 `(entity_id, unit_id)`；`tags` GIN。
+1. **索引层**：每 `(bank, fact_type)` 部分 HNSW（3.1，store-owned bank 除外）；`search_vector` GIN / 扩展 BM25 索引（3.2）；`memory_links` 的 `(from_unit_id, link_type, weight DESC)` 复合索引供 LATERAL 早停（`memories/pg/recall.py:584-587` 注释、`link_expansion.py:317-322`）；`unit_entities` 的 `(entity_id, unit_id)`；`tags` GIN。
 2. **查询层**：合并 SQL 少一次往返（semantic+BM25 同船）；图种子复用语义臂结果省一次 ANN（3.1）；图臂单条 CTE 一次往返完成三信号扩展（`link_expansion.py:120-124`）；时间臂 pool/入口点常数（60→10→8 桶）都是实测调优值；BM25 词项选择防长查询扫描风暴（3.2）；query 里"没有日期就别碰 dateparser"的预检（3.4）。
-3. **执行层**：`budgeted_operation` 限制单次 recall 的连接数（默认 4，`recall_connection_budget`，`config.py:1585`，`memory_engine.py:9384-9391`）；进程级 semaphore 限 32 并发 recall（:8920）；时间提取单 worker 线程化保护事件循环（3.4）；cross-encoder 懒初始化 + 初始化超时（`reranking.py:330-362`）+ 本地并发上限 `reranker_local_max_concurrent=4`（`config.py:1277`）+ 进程内重排墙钟上限 `reranker_local_timeout=300s`（3.6，#4696）。
-4. **数据移动层**：宽臂只搬 id+分数，`hydrate_results` 只在预过滤后为幸存者取正文（`memory_engine.py:9778-9796`）；observation 的 `source_memory_ids` 被 prefer_observations 去重、chunk 抓取、source_facts 三处复用，能带就带、不再回查（:9967-9988, :10029-10041, :10250-10262 的注释）；chunks 一次抓全再在 Python 里做 token 记账（"one round-trip is always faster than multiple batched round-trips"，:10083-10084）。
-5. **架构层**：`full_recall` 允许自持索引的 store 把整条 recall（含融合与重排）搬到数据所在地，把 N 次往返压成 1 次（`memory_engine.py:9243-9262` 的长注释；默认 Postgres store 不实现即 declines）。
+3. **执行层**：`budgeted_operation` 限制单次 recall 的连接数（默认 4，`recall_connection_budget`，`config.py:1585`，`memory_engine.py:9400-9407`）；进程级 semaphore 限 32 并发 recall（:8936）；时间提取单 worker 线程化保护事件循环（3.4）；cross-encoder 懒初始化 + 初始化超时（`reranking.py:330-362`）+ 本地并发上限 `reranker_local_max_concurrent=4`（`config.py:1277`）+ 进程内重排墙钟上限 `reranker_local_timeout=300s`（3.6，#4696）。
+4. **数据移动层**：宽臂只搬 id+分数，`hydrate_results` 只在预过滤后为幸存者取正文（`memory_engine.py:9794-9812`）；observation 的 `source_memory_ids` 被 prefer_observations 去重、chunk 抓取、source_facts 三处复用，能带就带、不再回查（:9990-10011, :10052-10064, :10276-10288 的注释）；chunks 一次抓全再在 Python 里做 token 记账（"one round-trip is always faster than multiple batched round-trips"，:10106-10107）。
+5. **架构层**：`full_recall` 允许自持索引的 store 把整条 recall（含融合与重排）搬到数据所在地，把 N 次往返压成 1 次（`memory_engine.py:9259-9278` 的长注释；默认 Postgres store 不实现即 declines）。
 
 顺带一提 `think_utils.py`：它不在检索主链上，是 reflect/think 操作的工具——把 recall 返回的事实格式化成 LLM prompt（`format_facts_for_prompt`，:53-78；0.10.2 起 context 字段过 `truncate_context_for_prompt` 截断，#5086）并按 bank 的 disposition 三特征（skepticism/literalism/empathy 1-5）拼系统提示（`get_system_message`，:138-166），是 recall 下游的第一个消费者。
 
 ### 3.11 值得记取的工程细节（附证据）
 
 - **查询长度三重防御**：HTTP 400（>500 token）→ 引擎内截断（防 consolidation 用整段事实文本当查询：一次退化提取的 58k 词文本被整段召回，拼出 5.4 万词项的 OR tsquery，求值打爆 PG 栈深度（SQLSTATE 54001）、卡死该 bank 一周——源注释另记全文仅 4 个 distinct token（issue #3134，`memory_engine.py:8786-8795`））→ BM25 词项选择。
-- **bank 不存在返回 404** 而不是空结果：空结果与健康空 bank 无法区分，还白付了整套检索扇出的钱（#4175/#4442，`memory_engine.py:8858-8865`）。0.10.2 补了一个尾洞：bank 被另一进程在缓存 TTL 内删除时，存在性守卫仍会放行、然后 recall 在 store 侧炸掉或返回空——现在失败路径与"SQL recall 返回空且 bank 非 store-owned"两条路上都会用**未缓存**的复查补发 404（:8987-8994, :9058-9068）。
-- **取消传播**：HTTP 断连在每个阶段边界检查 `request_context.raise_if_cancelled()`（:8774, 9241, 9806, 9945），重排这种不可中断的 CPU 段之前特意设卡。
-- **trace 时间戳语义**：trace 的 timestamp 是"排名计算所依据的锚点"（调用方的 `question_date`），不是 trace 构建时刻（#4217，`memory_engine.py:9179-9188`）。
-- **陈旧 docstring 残留**（读码时勿信）：`memory_engine.py:8723`（recall_async docstring，另见 ：8649）写 budget "high=600 units"，与实现（HIGH=1000，`config.py:1942`）矛盾；:9146 的架构注释 "4. Diversity: MMR with λ=0.5" 在当前管线无对应实现（融合后是 RRF/interleave + cross-encoder，无 MMR 步骤）；迁移过来的 `memories/pg/recall.py:59-61` 仍写 per-fact_type 索引 "created automatically by Alembic migration a3b4c5d6e7f8_add_partial_hnsw_indexes.py"——该文件名的迁移并不存在（versions/ 下只有同前缀的 `a3b4c5d6e7f8_add_consolidation_failed_at...`），且它点名的 idx_mu_emb_world/observation/experience 三个 fact_type-only 索引已被 `d5e6f7a8b9c0` 删除并按 `(bank_id, fact_type)` 重建，与上两条同类。
+- **bank 不存在返回 404** 而不是空结果：空结果与健康空 bank 无法区分，还白付了整套检索扇出的钱（#4175/#4442，`memory_engine.py:8874-8881`）。0.10.2 补了一个尾洞：bank 被另一进程在缓存 TTL 内删除时，存在性守卫仍会放行、然后 recall 在 store 侧炸掉或返回空——现在失败路径与"SQL recall 返回空且 bank 非 store-owned"两条路上都会用**未缓存**的复查补发 404（:9003-9010, :9074-9084）。
+- **取消传播**：HTTP 断连在每个阶段边界检查 `request_context.raise_if_cancelled()`（:8774, 9257, 9822, 9968），重排这种不可中断的 CPU 段之前特意设卡。
+- **trace 时间戳语义**：trace 的 timestamp 是"排名计算所依据的锚点"（调用方的 `question_date`），不是 trace 构建时刻（#4217，`memory_engine.py:9195-9204`）。
+- **陈旧 docstring 残留**（读码时勿信）：`memory_engine.py:8723`（recall_async docstring，另见 ：8649）写 budget "high=600 units"，与实现（HIGH=1000，`config.py:1942`）矛盾；:9162 的架构注释 "4. Diversity: MMR with λ=0.5" 在当前管线无对应实现（融合后是 RRF/interleave + cross-encoder，无 MMR 步骤）；迁移过来的 `memories/pg/recall.py:59-61` 仍写 per-fact_type 索引 "created automatically by Alembic migration a3b4c5d6e7f8_add_partial_hnsw_indexes.py"——该文件名的迁移并不存在（versions/ 下只有同前缀的 `a3b4c5d6e7f8_add_consolidation_failed_at...`），且它点名的 idx_mu_emb_world/observation/experience 三个 fact_type-only 索引已被 `d5e6f7a8b9c0` 删除并按 `(bank_id, fact_type)` 重建，与上两条同类。
 
 ---
 
@@ -590,4 +590,4 @@ recall 路径上没有传统意义的"结果缓存"，但优化密度很高：
 1. **`full_recall` 的非 Postgres 实现**（哪个 store 真正实现了 store-answered recall、其 per-stage 计时内容）在 `engine/memories/` 之外的扩展包里，本文只确认了接口契约与默认 declines（`memories/base.py:1751-1773`），未逐一核对实现方。
 2. cross-encoder 各远程 provider 的重试/超时矩阵（`config.py` 的常量与 `cross_encoder.py` 内部实现；0.10.2 起本地成员另有 `local_timeout` 墙钟上限与 failover 链的 `_served_provider` 记录，见 3.6）按分工属于 M5，本文未展开。
 3. `TransformerQueryAnalyzer` 在当前配置下是否可被选为默认（`from_env` 的选择逻辑未追到），主路径默认确认为 Dateparser 版（`temporal_extraction.py:75`）。
-4. `observation_sources` 结对表为 **Oracle 专属**（PG 走 `memory_units.source_memory_ids` 数组列：契约默认 True 在 `db/ops.py:346-352`，PG 覆写 False 在 `ops_postgresql.py:83-84`）；该表在 Oracle 侧的完整 DDL 与写入时机（consolidation 侧，`consolidator.py:2850-2860` 起的同步分支）未在本文核实。
+4. `observation_sources` 结对表为 **Oracle 专属**（PG 走 `memory_units.source_memory_ids` 数组列：契约默认 True 在 `db/ops.py:346-352`，PG 覆写 False 在 `ops_postgresql.py:83-84`）；该表在 Oracle 侧的完整 DDL 与写入时机（consolidation 侧，`consolidator.py:2860-2870` 起的同步分支）未在本文核实。

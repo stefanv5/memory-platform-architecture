@@ -1,6 +1,6 @@
 # 06 · API 层与服务形态
 
-> 代码基线：`f7dd3f4fd`（v0.10.2，2026-10-03）；本篇已随 0.10.2 全量更新（原基线 `12f2d54f6`）。
+> 代码基线：`5b8356bb2`（v0.10.2，2026-10-05）；本篇已随 0.10.2 全量更新（原基线 `12f2d54f6`）。
 
 > 研究对象：`hindsight-api-slim/hindsight_api/`（api/、worker/、main.py、server.py、daemon.py、mcp*.py、metrics*.py、tracing.py、liveness.py、loop_watchdog.py、cancellation.py）、`hindsight-extensions/`、发布包链（hindsight-api-slim → hindsight-api → hindsight-all* → npm 包）。
 > 方法：全部论断均直接读码核实，标注 `相对路径:行号`（相对 `hindsight-api-slim/`，其他目录标注全路径）。无法确认的条目在文末单独列出。
@@ -67,58 +67,58 @@ flowchart LR
 
 先明确两个贯穿全文的名词：**bank**（记忆库）是 Hindsight 的隔离存储单元，相当于一个 agent 独立的"大脑"，URL 中的 `{bank_id}` 即其标识；**租户（tenant）**是 bank 之上的部署级隔离，映射到独立的数据库 schema。
 
-- **REST**：全部业务路由挂在 `/v1/default/banks/{bank_id}/...` 前缀下（`default` 是租户占位段——`TenantExtension` 决定它映射到哪个 schema），仅两条例外：bank 前缀之外的 `GET /v1/default/chunks/{chunk_id:path}`（7958）与 `GET /v1/default/files/download/{key:path}`（9268）；另有 `/health`、`/health/ready`、`/health/live`、`/metrics`、`/version`、`/v1/bank-template-schema`。扩展 HTTP 路由挂 `/ext/`（http.py:5215-5230）。
-- **MCP**：FastMCP 实现的 streamable HTTP/SSE 服务，挂在**同一个 FastAPI app 之外包一层 ASGI 中间件**（`api/__init__.py:97-105`），路径 `/mcp`（多 bank 模式，39 个工具）与 `/mcp/{bank_id}`（单 bank 模式，36 个工具，见 `mcp.py:131-166`）。工具清单在 `mcp_tools.py:43-84` 的 `_ALL_TOOLS`（39 个）：`retain`/`sync_retain`/`recall`/`reflect`、mental-model 全套 CRUD+`refresh`/`clear`、directives、memories/documents/operations/tags 的 list-get-update-delete、bank 管理、knowledge-base 树与页 CRUD。MCP 与 REST 共享同一个 `MemoryEngine` 实例，不是独立服务。
+- **REST**：全部业务路由挂在 `/v1/default/banks/{bank_id}/...` 前缀下（`default` 是租户占位段——`TenantExtension` 决定它映射到哪个 schema），仅两条例外：bank 前缀之外的 `GET /v1/default/chunks/{chunk_id:path}`（7960）与 `GET /v1/default/files/download/{key:path}`（9270）；另有 `/health`、`/health/ready`、`/health/live`、`/metrics`、`/version`、`/v1/bank-template-schema`。扩展 HTTP 路由挂 `/ext/`（http.py:5217-5232）。
+- **MCP**：FastMCP 实现的 streamable HTTP/SSE 服务，挂在**同一个 FastAPI app 之外包一层 ASGI 中间件**（`api/__init__.py:97-105`），路径 `/mcp`（多 bank 模式，39 个工具）与 `/mcp/{bank_id}`（单 bank 模式，36 个工具，见 `mcp.py:131-166`）。工具清单在 `mcp_tools.py:43-84` 的 `_ALL_TOOLS`（39 个）：`retain`/`sync_retain`/`recall`/`reflect`、mental-model 全套 CRUD+`refresh`/`clear`、directives、memories/documents/operations/tags 的 list-get-update-delete、bank 管理、knowledge-base 树与页 CRUD。工具 schema 有一处刻意的"去类型化"：mental-model 触发器的 `tag_groups` 参数在 schema 里是普通 JSON 对象数组（`list[dict]`，`mcp_tools.py:159`）而非嵌套 Pydantic 模型——TagGroup 自引用（and/or/not 递归持有子组）会让 JSON Schema 递归、部分 LLM provider 因此拒收整个工具清单（#5013/#5244），形状校验改由 `field_validator` 把 dict 回穿 TagGroup 适配器完成（`mcp_tools.py:235-244`）。MCP 与 REST 共享同一个 `MemoryEngine` 实例，不是独立服务。
 - **根级 `mcp_local.py`**：不是独立 MCP server，而是给本机 Claude Code 用的"一条命令起全家"薄壳——默认 `pg0://hindsight-mcp` 数据库，然后直接调用 `hindsight_api.main.main()`（`mcp_local.py:29-40`），完整 API 跑在 8888，MCP 端点是 `http://localhost:8888/mcp/`（HTTP transport，见其 docstring 1-24 行；`mcp_tools.py` 顶部 docstring 仍称它为 stdio transport，与实际实现不符，属文档残留）。
 
 ## 1.4 REST 端点地图（按资源分组）
 
-以下为 `_register_routes`（http.py:5336 起）注册的全部业务路由（省略共同前缀 `/v1/default`；方法后为 handler 名，数字为定义处行号）。这张地图有两个用途：作为后续各小节的公共底图（retain/recall/operations 均会回指），以及开发时按 handler 名/行号直接跳转源码。顺读只需关注四组——**监控/元信息、Banks 与配置、Memory 写入与查询、异步操作管理**——它们覆盖主流程；其余分组按需查阅。v0.10.2 相比上一版新增 4 条路由（bank aliases 全套），总数 99 条；另有多条列表/搜索路由追加了 tag 过滤参数（#5031/#5034，参数级变化，不新增路由）。
+以下为 `_register_routes`（http.py:5338 起）注册的全部业务路由（省略共同前缀 `/v1/default`；方法后为 handler 名，数字为定义处行号）。这张地图有两个用途：作为后续各小节的公共底图（retain/recall/operations 均会回指），以及开发时按 handler 名/行号直接跳转源码。顺读只需关注四组——**监控/元信息、Banks 与配置、Memory 写入与查询、异步操作管理**——它们覆盖主流程；其余分组按需查阅。v0.10.2 相比上一版新增 4 条路由（bank aliases 全套），总数 99 条；另有多条列表/搜索路由追加了 tag 过滤参数（#5031/#5034，参数级变化，不新增路由）。
 
 **监控/元信息**
-- `GET /health`、`GET /health/ready`（就绪，查数据库，5549）、`GET /health/live`（存活，不碰数据库，5566）、`GET /metrics`（Prometheus，5625，渲染已移出事件循环，见 3.5）、`GET /version`、`GET /v1/bank-template-schema`
+- `GET /health`、`GET /health/ready`（就绪，查数据库，5551）、`GET /health/live`（存活，不碰数据库，5568）、`GET /metrics`（Prometheus，5627，渲染已移出事件循环，见 3.5）、`GET /version`、`GET /v1/bank-template-schema`
 
 **Banks 与配置**
-- `GET /banks`（列表，6474）、`PUT /banks/{bank_id}`（创建或更新，8475，`@audited("create_bank")`）、`PATCH /banks/{bank_id}`（8520）、`DELETE /banks/{bank_id}`（8566）
-- `GET /banks/{bank_id}/aliases`（8358）、`POST /banks/{bank_id}/aliases`（8381，201）、`PATCH /banks/{bank_id}/aliases/{alias}`（8412，设展示别名）、`DELETE /banks/{bank_id}/aliases/{alias}`（8447）——bank 别名全套，v0.10.2 新增（#4706/#4724，见 3.9）
-- `GET /banks/{bank_id}/stats`（6502）、`GET /banks/{bank_id}/stats/memories-timeseries`（6595）、`GET/PATCH/DELETE /banks/{bank_id}/config`（层级配置，写受 `HINDSIGHT_API_ENABLE_BANK_CONFIG_API` 控制，DELETE 重置 9557）、`POST /banks/{bank_id}/clone`（9131，整库克隆，202 异步）、`GET /banks/{bank_id}/tags`（7891）、`POST /banks/{bank_id}/health/llm`（6560，刻意做成 POST——会真实调用一次 provider）
-- legacy 的 `GET/PUT /banks/{bank_id}/profile`（8293/8306）与 `POST /banks/{bank_id}/background`（8321）已退役（保留路由恒返 410）
+- `GET /banks`（列表，6476）、`PUT /banks/{bank_id}`（创建或更新，8477，`@audited("create_bank")`）、`PATCH /banks/{bank_id}`（8522）、`DELETE /banks/{bank_id}`（8568）
+- `GET /banks/{bank_id}/aliases`（8360）、`POST /banks/{bank_id}/aliases`（8383，201）、`PATCH /banks/{bank_id}/aliases/{alias}`（8414，设展示别名）、`DELETE /banks/{bank_id}/aliases/{alias}`（8449）——bank 别名全套，v0.10.2 新增（#4706/#4724，见 3.9）
+- `GET /banks/{bank_id}/stats`（6504）、`GET /banks/{bank_id}/stats/memories-timeseries`（6597）、`GET/PATCH/DELETE /banks/{bank_id}/config`（层级配置，写受 `HINDSIGHT_API_ENABLE_BANK_CONFIG_API` 控制，DELETE 重置 9559）、`POST /banks/{bank_id}/clone`（9133，整库克隆，202 异步）、`GET /banks/{bank_id}/tags`（7893）、`POST /banks/{bank_id}/health/llm`（6562，刻意做成 POST——会真实调用一次 provider）
+- legacy 的 `GET/PUT /banks/{bank_id}/profile`（8295/8308）与 `POST /banks/{bank_id}/background`（8323）已退役（保留路由恒返 410）
 
 **Memory 写入与查询**
-- `POST /banks/{bank_id}/memories`（retain，同步/异步二合一，9931）、`POST .../memories/dry-run-extract`（5799）、`GET .../memories/list`（5692，列表+全文搜索）、`POST .../files/retain`（10217，文件转换后 retain）、`GET /v1/default/files/download/{key:path}`（9268，附件/导出 ZIP 下载）
-- `POST .../memories/recall`（检索，6042，handler `api_recall` 6056）、`DELETE /banks/{bank_id}/memories`（清空 bank 全部记忆，10386）
-- `GET .../memories/{memory_id}`（5923）、`GET .../memories/{memory_id}/history`（6011）、`PATCH .../memories/{memory_id}`（5955，update_memory；**invalidate 也是 PATCH**，body 带 `state: "invalidated"`，请求模型 2696-2710——没有独立 DELETE 单条路由）、`DELETE .../memories/{memory_id}/observations`（9460，清空该记忆的观察）
-- `POST /banks/{bank_id}/reflect`（处置感知推理，6295，handler `api_reflect` 6310）
+- `POST /banks/{bank_id}/memories`（retain，同步/异步二合一，9933）、`POST .../memories/dry-run-extract`（5801）、`GET .../memories/list`（5694，列表+全文搜索）、`POST .../files/retain`（10219，文件转换后 retain）、`GET /v1/default/files/download/{key:path}`（9270，附件/导出 ZIP 下载）
+- `POST .../memories/recall`（检索，6044，handler `api_recall` 6058）、`DELETE /banks/{bank_id}/memories`（清空 bank 全部记忆，10388）
+- `GET .../memories/{memory_id}`（5925）、`GET .../memories/{memory_id}/history`（6013）、`PATCH .../memories/{memory_id}`（5957，update_memory；**invalidate 也是 PATCH**，body 带 `state: "invalidated"`，请求模型 2698-2712——没有独立 DELETE 单条路由）、`DELETE .../memories/{memory_id}/observations`（9462，清空该记忆的观察）
+- `POST /banks/{bank_id}/reflect`（处置感知推理，6297，handler `api_reflect` 6312）
 
 **文档/实体/观察**
-- `GET /banks/{bank_id}/documents`（7683）、`GET/PATCH/DELETE .../documents/{document_id:path}`（7854/7997/8049）、`GET .../documents/{document_id:path}/chunks`（7755）、`POST .../documents/{document_id:path}/reprocess`（7811）、`GET /banks/{bank_id}/attachments/{attachment_id}`（9214，附件元数据读取）
-- `GET /banks/{bank_id}/graph`（5651，bank 级图）、`GET /v1/default/chunks/{chunk_id:path}`（7958，bank 外的 chunk 寻址读）
-- `GET /banks/{bank_id}/entities`（6630，支持 tag 过滤）、`GET .../entities/graph`（6678）、`GET .../entities/{entity_id}`（6720）、`POST .../entities/{entity_id}/regenerate`（6777）——实体为只读派生数据，无更新/删除端点
-- `DELETE /banks/{bank_id}/observations`（清空观察，9341）、`GET /banks/{bank_id}/observations/scopes`（9366）
+- `GET /banks/{bank_id}/documents`（7685）、`GET/PATCH/DELETE .../documents/{document_id:path}`（7856/7999/8051）、`GET .../documents/{document_id:path}/chunks`（7757）、`POST .../documents/{document_id:path}/reprocess`（7813）、`GET /banks/{bank_id}/attachments/{attachment_id}`（9216，附件元数据读取）
+- `GET /banks/{bank_id}/graph`（5653，bank 级图）、`GET /v1/default/chunks/{chunk_id:path}`（7960，bank 外的 chunk 寻址读）
+- `GET /banks/{bank_id}/entities`（6632，支持 tag 过滤）、`GET .../entities/graph`（6680）、`GET .../entities/{entity_id}`（6722）、`POST .../entities/{entity_id}/regenerate`（6779）——实体为只读派生数据，无更新/删除端点
+- `DELETE /banks/{bank_id}/observations`（清空观察，9343）、`GET /banks/{bank_id}/observations/scopes`（9368）
 
 **Mental Models / Directives / Knowledge Base**
-- `GET/POST /banks/{bank_id}/mental-models`（6802/6934）、`GET/PATCH/DELETE .../mental-models/{id}`（6865/7101/7144）、`POST .../{id}/refresh`（6981，异步任务）、`POST .../{id}/clear`（7065）、`POST .../{id}/dry-run-refresh`（7015）、`GET .../{id}/history`（6903）
-- `GET/POST /banks/{bank_id}/directives`（7502/7581）、`GET/PATCH/DELETE .../directives/{directive_id}`（7551/7616/7653）
-- `GET .../knowledge-base/tree|search|export`（7184/7339/7296，树与搜索支持 tag 过滤）、`POST .../knowledge-base/folders`（7211，创建文件夹）、`POST .../knowledge-base/pages`（7243，创建页面）、`GET .../knowledge-base/pages/{page_id}`（7374，空页返回空正文而非占位句，#4680）、`PATCH/DELETE .../knowledge-base/nodes/{node_id}`（7402/7471；全空 body 的 PATCH 被 engine 以 400 拒绝在任何 bank 读取之前，#4709）
+- `GET/POST /banks/{bank_id}/mental-models`（6804/6936）、`GET/PATCH/DELETE .../mental-models/{id}`（6867/7103/7146）、`POST .../{id}/refresh`（6983，异步任务）、`POST .../{id}/clear`（7067）、`POST .../{id}/dry-run-refresh`（7017）、`GET .../{id}/history`（6905）
+- `GET/POST /banks/{bank_id}/directives`（7504/7583）、`GET/PATCH/DELETE .../directives/{directive_id}`（7553/7618/7655）
+- `GET .../knowledge-base/tree|search|export`（7186/7341/7298，树与搜索支持 tag 过滤）、`POST .../knowledge-base/folders`（7213，创建文件夹）、`POST .../knowledge-base/pages`（7245，创建页面）、`GET .../knowledge-base/pages/{page_id}`（7376，空页返回空正文而非占位句，#4680）、`PATCH/DELETE .../knowledge-base/nodes/{node_id}`（7404/7473；全空 body 的 PATCH 被 engine 以 400 拒绝在任何 bank 读取之前，#4709）
 
 **异步操作管理（任务系统的 API 面）**
-- `GET /banks/{bank_id}/operations`（8092）、`GET .../operations/{operation_id}`（8140）、`DELETE .../operations/{operation_id}`（取消 pending/processing，8178）、`POST .../operations/{operation_id}/retry`（重排队 failed，8215）、`DELETE .../operations/{operation_id}/delete`（删除终态记录，8245）
+- `GET /banks/{bank_id}/operations`（8094）、`GET .../operations/{operation_id}`（8142）、`DELETE .../operations/{operation_id}`（取消 pending/processing，8180）、`POST .../operations/{operation_id}/retry`（重排队 failed，8217）、`DELETE .../operations/{operation_id}/delete`（删除终态记录，8247）
 
 **Consolidation**
-- `POST /banks/{bank_id}/consolidate`（9584，手动触发整合）、`POST .../consolidation-strategies/preview`（9400，试跑整合策略；策略体已类型化为 `ConsolidationStrategySpec` 列表，#4654）、`POST .../consolidation/recover`（9435）
+- `POST /banks/{bank_id}/consolidate`（9586，手动触发整合）、`POST .../consolidation-strategies/preview`（9402，试跑整合策略；策略体已类型化为 `ConsolidationStrategySpec` 列表，#4654）、`POST .../consolidation/recover`（9437）
 
 **Bank Transfer（整库搬运，v0.10.2 头部特性，见 3.9）**
-- `POST .../transfer/export`（8941，202 异步导出，三个 include 标志 + 可选 document_id 子集）、`POST .../transfer/import`（9025，202 异步导入，`mode=restore|merge`）
-- `POST .../clone`（9131，202 异步克隆 = 导出+导入在本进程背靠背）
-- 文档级历史端点：`POST .../document-transfer`（8867，异步文档导入提交）、`POST .../document-transfer/export`（8803，异步文档导出提交）、`GET .../document-transfer`（8773，同步全量导出已退役，恒返 410）
-- 轮询走 `GET .../operations/{operation_id}`（8140），ZIP 经 `GET /v1/default/files/download/{key:path}`（9268）下载——transfer 面没有 GET 形态的提交端点
+- `POST .../transfer/export`（8943，202 异步导出，三个 include 标志 + 可选 document_id 子集）、`POST .../transfer/import`（9027，202 异步导入，`mode=restore|merge`）
+- `POST .../clone`（9133，202 异步克隆 = 导出+导入在本进程背靠背）
+- 文档级历史端点：`POST .../document-transfer`（8869，异步文档导入提交）、`POST .../document-transfer/export`（8805，异步文档导出提交）、`GET .../document-transfer`（8775，同步全量导出已退役，恒返 410）
+- 轮询走 `GET .../operations/{operation_id}`（8142），ZIP 经 `GET /v1/default/files/download/{key:path}`（9270）下载——transfer 面没有 GET 形态的提交端点
 
 **Bank 模板（配置面，非归档）**
-- `GET /banks/{bank_id}/export`（8685，导出模板 manifest：config + mental models + directives）、`POST .../import`（8598，导入模板 manifest）——注意这两个是**模板**交换，与 Bank Transfer 的整库归档无关
+- `GET /banks/{bank_id}/export`（8687，导出模板 manifest：config + mental models + directives）、`POST .../import`（8600，导入模板 manifest）——注意这两个是**模板**交换，与 Bank Transfer 的整库归档无关
 
 **Webhooks / 审计 / LLM 观测 / 提示词**
-- `GET/POST /banks/{bank_id}/webhooks`（9708/9647）、`PATCH/DELETE .../webhooks/{id}`（9802/9771，无单条 GET；读取靠列表与 deliveries）、`GET .../webhooks/{id}/deliveries`（9885）
-- `GET /banks/{bank_id}/audit-logs`（10432，+ `GET .../audit-logs/stats` 10473）、`GET /banks/{bank_id}/llm-requests`（10506，+ `GET .../llm-requests/stats` 10564）、`POST /banks/{bank_id}/prompts/preview`（5858）
+- `GET/POST /banks/{bank_id}/webhooks`（9710/9649）、`PATCH/DELETE .../webhooks/{id}`（9804/9773，无单条 GET；读取靠列表与 deliveries）、`GET .../webhooks/{id}/deliveries`（9887）
+- `GET /banks/{bank_id}/audit-logs`（10434，+ `GET .../audit-logs/stats` 10475）、`GET /banks/{bank_id}/llm-requests`（10508，+ `GET .../llm-requests/stats` 10566）、`POST /banks/{bank_id}/prompts/preview`（5860）
 
 MCP 端能做的操作与上述 REST 面**大体对应**（共享 engine），差异只在工具粒度：MCP 没有 export/import/transfer/clone/consolidate 这类管理型操作；反向地，MCP 的 `list_banks`/`create_bank`/`get_bank`/`get_bank_stats` 直连 engine，没有一一对应的 REST 形态——**没有 `GET /banks/{bank_id}` 单体读取端点**；bank 详情从 `GET /banks` 列表与 `/stats`、`/config` 获取，PATCH/DELETE 只承担写。
 
@@ -174,12 +174,12 @@ flowchart TD
     F -->|"是"| H["传 import string<br/>每个子进程自建"]
     G --> I["uvicorn.run"]
     H --> I
-    I --> J["lifespan 启动<br/>http.py:4993"]
-    J --> K["loop_lag 探针 + OpenTelemetry（OTel）指标<br/>http.py:5009-5033"]
-    K --> L["initialize_tracing<br/>http.py:5037"]
-    L --> M["memory.initialize：建池 + 加载模型 + 跑迁移<br/>（部分维护例程随迁移安装，见 2.5 步骤 1）<br/>http.py:5041"]
-    M --> N["loop_watchdog + 进程内 WorkerPoller<br/>http.py:5054-5088"]
-    N --> O["tenant/http 扩展 on_startup<br/>http.py:5091-5096"]
+    I --> J["lifespan 启动<br/>http.py:4995"]
+    J --> K["loop_lag 探针 + OpenTelemetry（OTel）指标<br/>http.py:5011-5035"]
+    K --> L["initialize_tracing<br/>http.py:5039"]
+    L --> M["memory.initialize：建池 + 加载模型 + 跑迁移<br/>（部分维护例程随迁移安装，见 2.5 步骤 1）<br/>http.py:5044"]
+    M --> N["loop_watchdog + 进程内 WorkerPoller<br/>http.py:5056-5090"]
+    N --> O["tenant/http 扩展 on_startup<br/>http.py:5093-5098"]
     O --> P["开始服务流量"]
 ```
 
@@ -189,10 +189,10 @@ flowchart TD
 
 **第一段（`api/__init__.py:17-109`，统一入口）**：`create_app(memory, http_api_enabled, mcp_api_enabled, mcp_mount_path, initialize_memory)`——先建两个 FastMCP server（多 bank / 单 bank），再调 `api/http.py` 的 `create_http_app` 建 REST app，然后：① 用 `chained_lifespan`（`api/__init__.py:79-92`）把两个 MCP server 的 lifespan 包在 REST app 的 lifespan 外层——启动时先起 MCP、再起 REST，关闭顺序相反（lifespan 即 FastAPI/ASGI 的应用启动/关闭生命周期钩子）；② `app.add_middleware(MCPMiddleware, ...)` 把 MCP 中间件包在最外层（97-105 行）。注释解释不用 Starlette Mount 的原因：Mount 会让无尾斜杠的 `/mcp` 吃 307 重定向。
 
-**第二段（`api/http.py:4955-5242`，本文件也叫 `create_app`，`api/__init__.py` 里以 `create_http_app` 别名导入）**：`create_app` 依次做入口处 profiling 装配（4981-4985，保证 `--workers N` 时每个子进程也装上 cProfile）、route_class 替换（`ExcludeNoneRoute`→`UnknownParamsRoute`，5165/5205）、GZip（5175-5177，阈值可配，负值整体关闭）、OpenAPI ValidationError 补丁（5186-5197）、**准入控制器**挂 `app.state.admission`（5209）、注册全部路由（5212）、`/ext/` 扩展路由挂载（5215-5230，include_router 前先 `use_unknown_params_routes` 让扩展路由也走 UnknownParamsRoute）、两个纯 ASGI 中间件（见下）、OTel ASGI instrumentation（5241）。
+**第二段（`api/http.py:4957-5244`，本文件也叫 `create_app`，`api/__init__.py` 里以 `create_http_app` 别名导入）**：`create_app` 依次做入口处 profiling 装配（4983-4987，保证 `--workers N` 时每个子进程也装上 cProfile）、route_class 替换（`ExcludeNoneRoute`→`UnknownParamsRoute`，5167/5207）、GZip（5177-5179，阈值可配，负值整体关闭）、OpenAPI ValidationError 补丁（5188-5199）、**准入控制器**挂 `app.state.admission`（5211）、注册全部路由（5214）、`/ext/` 扩展路由挂载（5217-5232，include_router 前先 `use_unknown_params_routes` 让扩展路由也走 UnknownParamsRoute）、两个纯 ASGI 中间件（见下）、OTel ASGI instrumentation（5243）。
 
 ```python
-# hindsight_api/api/http.py:5229-5239
+# hindsight_api/api/http.py:5231-5241
     # Client-disconnect cancellation for recall/reflect. Added LAST so it sits
     # OUTSIDE the @app.middleware("http") (BaseHTTPMiddleware) layers above —
     # that placement is mandatory: BaseHTTPMiddleware breaks
@@ -205,9 +205,9 @@ flowchart TD
 ```
 
 逐点讲解：
-- Starlette 的 `add_middleware` 是插到栈顶（最后添加者在最外层），所以**自外向内**的完整顺序是：`MCPMiddleware` → `HttpObservabilityMiddleware` → `ClientDisconnectCancellationMiddleware` → `GZipMiddleware` → route_class（`UnknownParamsRoute`）→ FastAPI 依赖解析 → handler。上述是 tracing 关闭（默认）时的全部；**tracing 开启时** OTel ASGI 中间件经 `_instrument_app_for_tracing`（http.py:5290-5330）注入，位于 HttpObservability 之外、MCPMiddleware 之内——即 MCP → OTel → Observability → Disconnect → GZip。
-- 两个 ASGI 中间件都是纯 ASGI 实现，刻意替换掉了原来的两个 `@app.middleware("http")`（BaseHTTPMiddleware）：注释给出量级——BaseHTTPMiddleware 的每请求子任务 + memory-stream 中转在便宜路由上吃掉约 3 倍吞吐（5195-5200）；`api/observability.py:5-9` 记录 `/health/live` 从约 1500 rps 升到 5100 rps、p99 159ms→33ms。
-- `ClientDisconnectCancellationMiddleware` 的位置约束是"必须能读到原始请求字节流（receive 通道）"：任何包装 receive 的层（BaseHTTPMiddleware、OTel 的 receive span）都在它之外才能感知断连。它外面的 `HttpObservabilityMiddleware` 只包 send 不包 receive，OTel 又显式 `exclude_spans=["receive","send"]`（http.py:5328，省 span 的同时避免包装 receive 破坏断连检测），所以最外层是 MCP → observability、断连中间件在第三层也依然有效。
+- Starlette 的 `add_middleware` 是插到栈顶（最后添加者在最外层），所以**自外向内**的完整顺序是：`MCPMiddleware` → `HttpObservabilityMiddleware` → `ClientDisconnectCancellationMiddleware` → `GZipMiddleware` → route_class（`UnknownParamsRoute`）→ FastAPI 依赖解析 → handler。上述是 tracing 关闭（默认）时的全部；**tracing 开启时** OTel ASGI 中间件经 `_instrument_app_for_tracing`（http.py:5292-5332）注入，位于 HttpObservability 之外、MCPMiddleware 之内——即 MCP → OTel → Observability → Disconnect → GZip。
+- 两个 ASGI 中间件都是纯 ASGI 实现，刻意替换掉了原来的两个 `@app.middleware("http")`（BaseHTTPMiddleware）：注释给出量级——BaseHTTPMiddleware 的每请求子任务 + memory-stream 中转在便宜路由上吃掉约 3 倍吞吐（5197-5202）；`api/observability.py:5-9` 记录 `/health/live` 从约 1500 rps 升到 5100 rps、p99 159ms→33ms。
+- `ClientDisconnectCancellationMiddleware` 的位置约束是"必须能读到原始请求字节流（receive 通道）"：任何包装 receive 的层（BaseHTTPMiddleware、OTel 的 receive span）都在它之外才能感知断连。它外面的 `HttpObservabilityMiddleware` 只包 send 不包 receive，OTel 又显式 `exclude_spans=["receive","send"]`（http.py:5330，省 span 的同时避免包装 receive 破坏断连检测），所以最外层是 MCP → observability、断连中间件在第三层也依然有效。
 
 ## 2.3 请求 → 中间件 → 依赖 → engine：分层机制图
 
@@ -218,23 +218,23 @@ flowchart TD
     MW2 --> MW3["ClientDisconnectCancellationMiddleware<br/>recall/reflect 装断连令牌<br/>disconnect.py:49"]
     MW3 --> MW4["GZipMiddleware<br/>阈值 gzip_min_size"]
     MW4 --> ROUTE["route_class UnknownParamsRoute<br/>未知参数收集 + X-Ignored-Params"]
-    ROUTE --> DEP["FastAPI 依赖解析<br/>get_request_context → precheck_for → admit_for<br/>http.py:5342/5437/5399"]
+    ROUTE --> DEP["FastAPI 依赖解析<br/>get_request_context → precheck_for → admit_for<br/>http.py:5344/5439/5401"]
     DEP -->|"拒绝: 503/402/401，body 未读"| OUT["返回错误"]
     DEP -->|"放行"| HANDLER["handler: api_retain / api_recall / api_reflect<br/>加 @audited 装饰器"]
     HANDLER --> ENG["MemoryEngine<br/>_authenticate_tenant → _validate_operation → 业务"]
     ENG --> MEMO["MemoriesExtension（存储层插槽，见 3.6）<br/>默认 PostgresMemories"]
     MEMO --> DB[("PostgreSQL / Oracle 23ai")]
     MW1 -->|"/mcp 路径"| FASTMCP["FastMCP multi/single-bank server<br/>contextvars 传 bank_id/租户"]
-    MW1 -.-> OTELNOTE["注：tracing 开启时 OTel ASGI 中间件<br/>插在 MCPMiddleware 与 Observability 之间<br/>http.py:5290-5330"]
+    MW1 -.-> OTELNOTE["注：tracing 开启时 OTel ASGI 中间件<br/>插在 MCPMiddleware 与 Observability 之间<br/>http.py:5292-5332"]
     FASTMCP --> TOOLS["mcp_tools.py 39 个工具<br/>直接调 engine 方法"]
     TOOLS --> ENG
 ```
 
 依赖链的三个环节是理解每条重路由的关键（都在 `_register_routes` 内定义）：
 
-1. **`get_request_context`**（http.py:5342-5379）：从 `Authorization` 头取 API key（支持 `Bearer <key>` 与裸 key），并把 `HINDSIGHT_API_EXTENSION_PASSTHROUGH_HEADERS` 白名单中的头收进 `RequestContext.extra_headers`（默认空名单）。第一行 `request.scope.setdefault("hs_deps_t0", time.time())` 是给 recall 的分段计时埋点。
-2. **`precheck_for(operation)`**（http.py:5437-5512）：FastAPI **先解析依赖、后反序列化 body**（5444-5446 注释），所以它先 `memory._authenticate_tenant(request_context)`（5475，租户鉴权 + schema 定位），再调 `OperationValidator.precheck`（5493）——扩展可以在这里以 402/429 等拒绝请求，而请求体从未被读进内存。挂在 8 条计费路由上：dry-run-extract、recall、reflect、mental-model 创建/刷新/dry-run-refresh、retain、files/retain（http.py:5818/6061/6315/6949/6994/7040/9961/10254）。
-3. **`admit_for(operation)`**（http.py:5399-5435）：yield 风格依赖，`async with controller.admit(...)` 让准入许可覆盖整个请求生命周期；排队期间如果客户端断连（`AdmissionAbandoned`）直接 499 关闭，超时（`AdmissionRejected`）回 503 + `Retry-After`。
+1. **`get_request_context`**（http.py:5344-5381）：从 `Authorization` 头取 API key（支持 `Bearer <key>` 与裸 key），并把 `HINDSIGHT_API_EXTENSION_PASSTHROUGH_HEADERS` 白名单中的头收进 `RequestContext.extra_headers`（默认空名单）。第一行 `request.scope.setdefault("hs_deps_t0", time.time())` 是给 recall 的分段计时埋点。
+2. **`precheck_for(operation)`**（http.py:5439-5514）：FastAPI **先解析依赖、后反序列化 body**（5446-5448 注释），所以它先 `memory._authenticate_tenant(request_context)`（5477，租户鉴权 + schema 定位），再调 `OperationValidator.precheck`（5495）——扩展可以在这里以 402/429 等拒绝请求，而请求体从未被读进内存。挂在 8 条计费路由上：dry-run-extract、recall、reflect、mental-model 创建/刷新/dry-run-refresh、retain、files/retain（http.py:5820/6063/6317/6951/6996/7042/9963/10256）。
+3. **`admit_for(operation)`**（http.py:5401-5437）：yield 风格依赖，`async with controller.admit(...)` 让准入许可覆盖整个请求生命周期；排队期间如果客户端断连（`AdmissionAbandoned`）直接 499 关闭，超时（`AdmissionRejected`）回 503 + `Retry-After`。
 
 ## 2.4 贯穿例子 A：一次 POST retain 的完整 HTTP 旅程
 
@@ -243,19 +243,19 @@ flowchart TD
 1. **中间件段**：MCPMiddleware 前缀不匹配直接透传；HttpObservabilityMiddleware 记 `scope["hs_asgi_t0"]` 并使 `/banks/<id>` 模板化后计入 `hindsight.http.duration`；断连中间件对 `/memories/recall`、`/reflect` 结尾的路径才装令牌（retain 不装）；GZip 视大小压缩请求响应。
 2. **依赖段**：`get_request_context` 提取 API key → `precheck_for(RETAIN)`：租户鉴权（`_authenticate_tenant`，把 `_current_schema` ContextVar——请求作用域的上下文变量，可理解为协程版的 thread-local——设为租户 schema）+ validator `precheck`（可 402 拒费）→ `admit_for(RETAIN)` 拿准入许可（默认 32/核并发、排队上限 2s）。
 3. **body 解析**：`RetainRequest` 校验（items/document_tags/async_/operation_id...）。
-4. **handler `api_retain`**（http.py:9957-10213，`@audited("retain")` 在 9956）：
-   - 多模态内容先规范化：`canonicalize_item_content` 把图片块落成内容寻址附件、正文替换占位符（9998-10007），并处理"文档重发旧占位符"的编辑场景（9987-9995）；附件按文档归属入库（10008-10023），validator 拒绝时的附件回收在 engine 侧（memory_engine.py:22192）。
-   - items 按 `strategy` 分组，逐条拼 `content_dict`（timestamp→event_date、context、metadata、document_id、entities、tags、observation_scopes、update_mode...，10026-10080）。
-   - **async=true 分支**（10078-10109）：每个策略组调一次 `memory.submit_async_retain(...)`（10091），返回 `RetainResponse{success, bank_id, items_count, async: true, operation_id(s)}`。注意：**HTTP 状态是 200**（路由未设 202），异步语义靠 body 里的 `async: true` + `operation_id` 表达，客户端轮询 operations 端点。
-   - **async=false 分支**（10110-10161）：若 batch API 开启则强制拒绝同步模式（400，10114-10122）；否则逐组 `retain_batch_async` 同步执行（10130），聚合 token usage 后返回。
-5. **错误映射**（10162-10213）：validator 拒绝→其自带 status_code；operation_id 冲突→409；视觉不支持→422；参数错误→400；`MemoryDefenseAllBlockedError`→422 + violations 明细；其余→500（附输入摘要与 traceback）。
+4. **handler `api_retain`**（http.py:9959-10215，`@audited("retain")` 在 9958）：
+   - 多模态内容先规范化：`canonicalize_item_content` 把图片块落成内容寻址附件、正文替换占位符（10000-10009），并处理"文档重发旧占位符"的编辑场景（9989-9997）；附件按文档归属入库（10010-10025），validator 拒绝时的附件回收在 engine 侧（memory_engine.py:22218）。
+   - items 按 `strategy` 分组，逐条拼 `content_dict`（timestamp→event_date、context、metadata、document_id、entities、tags、observation_scopes、update_mode...，10028-10082）。
+   - **async=true 分支**（10080-10111）：每个策略组调一次 `memory.submit_async_retain(...)`（10093），返回 `RetainResponse{success, bank_id, items_count, async: true, operation_id(s)}`。注意：**HTTP 状态是 200**（路由未设 202），异步语义靠 body 里的 `async: true` + `operation_id` 表达，客户端轮询 operations 端点。
+   - **async=false 分支**（10112-10163）：若 batch API 开启则强制拒绝同步模式（400，10116-10124）；否则逐组 `retain_batch_async` 同步执行（10132），聚合 token usage 后返回。
+5. **错误映射**（10164-10217）：validator 拒绝→其自带 status_code；operation_id 冲突→409；视觉不支持→422；参数错误→400；`MemoryDefenseAllBlockedError`→422 + violations 明细；其余→500（附输入摘要与 traceback）。
 
-`submit_async_retain`（memory_engine.py:22148 起）内部：租户鉴权 → validator `validate_retain` → `sanitize_value` 清洗（防 U+0000/孤立代理对让 jsonb INSERT 直接炸，22200-22214）→ **幂等快路径**（22216-22233）→ 拒绝重复 document_id（仅异步路径，22234-22253）→ 按 token 预算 `_split_contents_into_async_children` 切子批（22264）→ 总是建 parent operation（22282-22284，"even for single batch - simpler, more reliable code path"）→ parent+子操作同一事务逐个入库 → 通知 task backend。
+`submit_async_retain`（memory_engine.py:22174 起）内部：租户鉴权 → validator `validate_retain` → `sanitize_value` 清洗（防 U+0000/孤立代理对让 jsonb INSERT 直接炸，22226-22240）→ **幂等快路径**（22242-22259）→ 拒绝重复 document_id（仅异步路径，22260-22279）→ 按 token 预算 `_split_contents_into_async_children` 切子批（22290）→ 总是建 parent operation（22308-22310，"even for single batch - simpler, more reliable code path"）→ parent+子操作同一事务逐个入库 → 通知 task backend。
 
 幂等键机制的完整规则：
 
 ```python
-# hindsight_api/engine/memory_engine.py:22119-22146（节选）
+# hindsight_api/engine/memory_engine.py:22145-22172（节选）
     async def _resolve_retain_replay(self, operation_id: uuid.UUID, bank_id: str) -> dict[str, Any] | None:
         """Resolve a caller-supplied async retain operation_id to a prior submission.
 
@@ -268,9 +268,9 @@ flowchart TD
 ```
 
 逐点讲解：
-- 客户端可自选 UUID 作 `operation_id`；重发同一 id 时若该 id 已是**本 bank 的 batch_retain parent**，直接回放原响应（`items_count` 存在 parent 的 `result_metadata` 里），**不产生新工作**——这是"丢失应答后重试不重复入库"的保证（22161-22164 docstring：parent 主键本身就是并发权威，无需额外去重列）。
+- 客户端可自选 UUID 作 `operation_id`；重发同一 id 时若该 id 已是**本 bank 的 batch_retain parent**，直接回放原响应（`items_count` 存在 parent 的 `result_metadata` 里），**不产生新工作**——这是"丢失应答后重试不重复入库"的保证（22190-22195 docstring：parent 主键本身就是并发权威，无需额外去重列）。
 - id 被其他 bank 或其他操作类型占用 → `RetainOperationConflictError` → HTTP 409。
-- 该 SELECT 刻意不在创建事务里（22219-22230 注释）：并发首次提交靠主键冲突兜底，快路径只为常见的顺序重试省事。
+- 该 SELECT 刻意不在创建事务里（22245-22256 注释）：并发首次提交靠主键冲突兜底，快路径只为常见的顺序重试省事。
 - 其他异步操作（consolidate、refresh_mental_model、export/import 等）没有客户端幂等键，靠的是**提交期去重**（`dedupe_by_bank` / `dedupe_in_flight_payload_key`，见 3.1）。
 
 ## 2.5 贯穿例子 B：worker 认领一次 retain 任务的数据库操作全程
@@ -382,7 +382,7 @@ sequenceDiagram
 
 **表结构**：初始迁移建表（`alembic/versions/5a366d414dce_initial_schema.py:217-243`）只有 `operation_id(UUID PK)/bank_id/operation_type/status/created_at/updated_at/completed_at/error_message/result_metadata(jsonb)`，status CHECK 约束限定 `('pending','processing','completed','failed')`。任务化所需的列由后续迁移分批补齐：`l7g8h9i0j1k2_add_worker_columns.py:40-69` 加 `worker_id/claimed_at/retry_count/task_payload(jsonb)` 四列（并建 `worker_id` 部分索引，79 行附近）；`next_retry_at` 由 `e4f5a6b7c8d9_add_webhooks_tables.py:49-55` 添加（连同 `(status, next_retry_at)` 轮询索引）；`d9c1a7b4e2f6_async_operations_serialization_key.py:54-61` 加 `serialization_key` 与 `(bank_id, serialization_key)` 的**部分（非唯一）索引**——`CREATE INDEX`，WHERE 还含 `serialization_key IS NOT NULL AND status IN ('pending','processing')`。同文档 retain 的串行化保证来自认领谓词 `bank_serialization_sql`（见 3.2）而非数据库唯一约束，这个索引只是让谓词查得快；折叠（3.3 之前例 B）同样按它定位兄弟行。（`cancelled` 状态由代码写入，CHECK 约束在 `i4j5k6l7m8n9_add_cancelled_status_to_async_operations.py:28-31` 扩为五值；api-slim 迁移目录里另有 `add_scheduled_mental_model_refresh_routine`、`schemas_with_expired_operations` 等服务端例程迁移。）
 
-**operation_type 清单**（代码中出现者）：`retain`（= batch_retain 子件，payload 的 `type` 字段为 `"batch_retain"`，`memory_engine.py:21911-21914`）、`batch_retain`（父聚合行，payload 为 NULL 不可认领）、`file_convert_retain`、`consolidation`、`refresh_mental_model`、`webhook_delivery`、`import_documents`/`export_documents`/`import_bank`/`export_bank`、`clone_bank`（memory_engine.py:7797）、`graph_maintenance`、`vector_index_maintenance`。
+**operation_type 清单**（代码中出现者）：`retain`（= batch_retain 子件，payload 的 `type` 字段为 `"batch_retain"`，`memory_engine.py:21937-21940`）、`batch_retain`（父聚合行，payload 为 NULL 不可认领）、`file_convert_retain`、`consolidation`、`refresh_mental_model`、`webhook_delivery`、`import_documents`/`export_documents`/`import_bank`/`export_bank`、`clone_bank`（memory_engine.py:7797）、`graph_maintenance`、`vector_index_maintenance`。
 
 **三种 task backend**（`engine/task_backend.py`）——注意它们的分工是"提交侧如何通知"，不是三套队列：
 
@@ -392,9 +392,9 @@ sequenceDiagram
 | `WorkerTaskBackend` | task_backend.py:126-150 | **no-op**："row already exists in async_operations; a worker will claim it" | `hindsight-worker` 独立进程（worker/main.py:284-290）——worker 执行中触发的子任务（如 retain 触发的 consolidation）行已入库，交给下一轮轮询，避免阻塞父任务 |
 | `SyncTaskBackend` | task_backend.py:95-123 | 立即内联执行（`_execute_task`） | 测试/嵌入用法 |
 
-关键演进点（memory_engine.py:21907-21910 注释）：早期 INSERT 不带 payload、靠 `submit_task` 二次 UPDATE 补——两次写之间崩溃会留下"payload 为 NULL 的行"，而认领查询要求 `task_payload IS NOT NULL`，该行永远无人认领。现在 payload 与行**同一 INSERT 原子写入**（21911-21917 构造、22100-22112 落库），UPDATE 只作兼容。
+关键演进点（memory_engine.py:21934-21937 注释）：早期 INSERT 不带 payload、靠 `submit_task` 二次 UPDATE 补——两次写之间崩溃会留下"payload 为 NULL 的行"，而认领查询要求 `task_payload IS NOT NULL`，该行永远无人认领。现在 payload 与行**同一 INSERT 原子写入**（21938-21943 构造、22126-22138 落库），UPDATE 只作兼容。
 
-**提交期去重**（`_submit_async_operation`，memory_engine.py:21853-22117）：retain 之外的异步提交都走这个通用入口，两级去重避免重复任务堆积——`dedupe_by_bank`（21955-21990）按 bank+operation_type 查 pending（可选含 processing）行，命中则复用既有 operation_id 直接返回 `deduplicated=True`，适用于"一个 bank 同时只该有一个"的作业（如手动 consolidate）；`dedupe_in_flight_payload_key`（22053-22096）更细，按 `task_payload->>'<key>'` 匹配同一负载主体（如同一 `mental_model_id`）的在途任务。去重开启时提交会先对 banks 行加 `FOR NO KEY UPDATE` 锁（21925-21950），把"查重→插入"串行化，防两个并发提交都看不到对方（#1842）。
+**提交期去重**（`_submit_async_operation`，memory_engine.py:21879-22143）：retain 之外的异步提交都走这个通用入口，两级去重避免重复任务堆积——`dedupe_by_bank`（21981-22016）按 bank+operation_type 查 pending（可选含 processing）行，命中则复用既有 operation_id 直接返回 `deduplicated=True`，适用于"一个 bank 同时只该有一个"的作业（如手动 consolidate）；`dedupe_in_flight_payload_key`（22079-22122）更细，按 `task_payload->>'<key>'` 匹配同一负载主体（如同一 `mental_model_id`）的在途任务。去重开启时提交会先对 banks 行加 `FOR NO KEY UPDATE` 锁（21948-21980，注释从 21949 起给出"为何不是 FOR UPDATE"的 FK FOR KEY SHARE 冲突分析，clause 按 `serialize` 条件拼接在 21975-21978），把"查重→插入"串行化，防两个并发提交都看不到对方（#1842）。
 
 ## 3.2 认领 SQL 的核心逻辑与公平性
 
@@ -449,23 +449,23 @@ def build_controller_from_config(config) -> AdmissionController:
 ```
 
 逐点讲解：
-- **什么条件下拒绝**：lane 启用（`max_in_flight > 0`）且请求在队列里等了超过 `max_wait_seconds` → `AdmissionRejected` → handler 依赖层转 **503 + `Retry-After`**（http.py:5428-5433）。默认值（config.py:1563-1588）：recall 16/核、等 30s；reflect 16/核、等 5s；retain 32/核、等 2s。`max_in_flight` 环境变量为**负数**才关闭 lane（0 表示"按核数推导"）；`max_wait_seconds=0` 是"绝不排队"模式——内部仍走 acquire，只是 deadline 设成 0.001s（admission.py:215），继续走同一条 acquire 路径，统计不失真。
-- **等待是可中断的**：`_acquire_unless_abandoned`（109-152）用 `asyncio.wait` 让"拿许可"与"断连令牌"赛跑；客户端先走则抛 `_ClientGone` → **499** 关闭（http.py:5424-5427），既不占槽也不造响应。取消 pending acquire 后若许可恰好已到手，会立刻 `semaphore.release()` 归还防泄漏（142-148）。
+- **什么条件下拒绝**：lane 启用（`max_in_flight > 0`）且请求在队列里等了超过 `max_wait_seconds` → `AdmissionRejected` → handler 依赖层转 **503 + `Retry-After`**（http.py:5430-5435）。默认值（config.py:1563-1588）：recall 16/核、等 30s；reflect 16/核、等 5s；retain 32/核、等 2s。`max_in_flight` 环境变量为**负数**才关闭 lane（0 表示"按核数推导"）；`max_wait_seconds=0` 是"绝不排队"模式——内部仍走 acquire，只是 deadline 设成 0.001s（admission.py:215），继续走同一条 acquire 路径，统计不失真。
+- **等待是可中断的**：`_acquire_unless_abandoned`（109-152）用 `asyncio.wait` 让"拿许可"与"断连令牌"赛跑；客户端先走则抛 `_ClientGone` → **499** 关闭（http.py:5426-5429），既不占槽也不造响应。取消 pending acquire 后若许可恰好已到手，会立刻 `semaphore.release()` 归还防泄漏（142-148）。
 - **为什么按操作分 lane 而不是全局限流**：同一 API 上操作成本跨三个量级（/health/live 约 0.1ms、bank stats 约 0.5ms、recall 约 23ms，admission.py:26-31）——按 recall 校准的全局限流会掐死健康检查。
 - **限额是每 worker 进程一份**（admission.py:33-35）：`--workers N` 时全局预算 = N × max_in_flight。main.py:463-466 把 N 写回环境变量，让子进程各自分摊 CPU 预算。
-- 拒绝点在 FastAPI 依赖里，**body 反序列化之前**——最便宜的拒绝位置（http.py:5444-5446）。
+- 拒绝点在 FastAPI 依赖里，**body 反序列化之前**——最便宜的拒绝位置（http.py:5446-5448）。
 
 ## 3.5 可观测性与运行时安全
 
 **metrics（metrics.py，1368 行）**：OpenTelemetry API + Prometheus reader，`/metrics` 暴露。核心 instruments（metrics.py:479-656）：`hindsight.operation.duration/.total`（取消的请求**不计入** total——success/failure 都不算，issue #2122，metrics.py:68-90 沿 `__cause__` 链识别 `OperationCancelledError`）、`hindsight.llm.duration/tokens.*`（v0.10.2 起推理令牌单独入账，`tokens.cached_input`/`tokens.thoughts`）、`hindsight.http.duration/.requests.total/.in_progress`、`hindsight.db.pool.acquire_wait` + size/idle/min/max/**waiting**（waiting 需要池侧 instrumentation 提供 asyncpg 不暴露的等待者计数）、recall/retain/validator 分阶段直方图、`hindsight.event_loop.stalls/stall_duration/lag`。基数控制：路径模板化（`normalize_http_endpoint`，172）、bank_id/tenant 标签默认关闭、token 桶化。可选 backlog gauge（默认关，`HINDSIGHT_API_METRICS_BACKLOG_ENABLED`）由 30s 后台循环跨所有 schema COUNT `async_operations`（1155 起）。
 
-**/metrics 的渲染已移出事件循环（#4617）**：`generate_latest()`（多 worker 模式下还有 `WorkerMetrics.render()`，带文件 I/O）是同步的，序列化成本随基数增长，大注册表上要几百 ms 到秒级；以前内联 await 会把 asyncio 循环整个冻住——/health、WebSocket 握手、该 worker 在处理的一切请求都停摆。现在 `await asyncio.to_thread(render)`（http.py:5647-5648）；worker 进程的 `/metrics` 同样处理（worker/main.py:145-151——它的 app 还兼着 `/health/live`，卡住的探活会触发重启并连坐已认领任务）。移出线程不等于免费：纯 Python 渲染握着 GIL，但循环从"全程冻结"变成按 5ms 时间片让出，是"降级"与"假死"的区别。
+**/metrics 的渲染已移出事件循环（#4617）**：`generate_latest()`（多 worker 模式下还有 `WorkerMetrics.render()`，带文件 I/O）是同步的，序列化成本随基数增长，大注册表上要几百 ms 到秒级；以前内联 await 会把 asyncio 循环整个冻住——/health、WebSocket 握手、该 worker 在处理的一切请求都停摆。现在 `await asyncio.to_thread(render)`（http.py:5649-5650）；worker 进程的 `/metrics` 同样处理（worker/main.py:145-151——它的 app 还兼着 `/health/live`，卡住的探活会触发重启并连坐已认领任务）。移出线程不等于免费：纯 Python 渲染握着 GIL，但循环从"全程冻结"变成按 5ms 时间片让出，是"降级"与"假死"的区别。
 
 **`memories_backend` 标签（#5129，opt-in）**：混合存储部署（不同 bank 归不同 memories store）需要比较各后端延迟，而 per-tenant 标签基数太高。`MemoriesExtension.backend_name_for(bank_id)`（memories/base.py:1076，默认返回空串=不加标签，已有序列保持不变）给出 store 名后：`hindsight.operation.*` 挂 `memories_backend`（每次操作解析一次，metrics.py:717-718）；operation 内记录的 recall 分阶段经 ContextVar `_current_memories_backend`（metrics.py:49）继承同一标签，无需把 bank_id 传进每个阶段调用点；retain 阶段的 `store` 标签优先用这个名字（retain/timing.py:187-192 的 `timed_retain`）。
 
 **多 worker 指标（metrics_multiworker.py）**：`--workers N` 时一次抓取只会打到随机一个 worker。方案不是 OTel 多进程模式（PrometheusMetricReader 跨进程不可合并），而是：每个 worker 用非阻塞 `flock` 认领槽位 0..N-1（内核在进程死亡时自动放锁，重启 worker 复用槽号、标签有界）→ 守护线程每 5s 原子写 `worker-<slot>.prom` 快照到以 supervisor pid 命名的临时目录 → `/metrics` 把自己 + 15s 内新鲜的其他槽快照合并，所有样本贴 `api_worker="<slot>"` 标签，**不求和**（"summing is a query-time decision"，metrics_multiworker.py:96-98）。开关 `HINDSIGHT_API_METRICS_WORKER_LABEL`（默认 false）。
 
-**tracing（tracing.py）**：OTLP HTTP exporter，`HINDSIGHT_API_OTEL_TRACES_ENABLED` + `HINDSIGHT_API_OTEL_EXPORTER_OTLP_ENDPOINT`（默认均关）。span 层级：HTTP server span 按操作**改名**（`hindsight.recall/retain/reflect/...`，`_name_server_span_after_operation` http.py:5259-5288，让 trace 标题是操作而非 URL 模板）→ engine 的 `hindsight.*` 父 span → GenAI 语义规范的 LLM 子 span（prompt/completion 以事件附带，内容截断 10 万字符）→ reflect 的 per-tool span。跨进程续 trace：入队时把 W3C traceparent 注进 payload 的 `_traceparent` 键，worker 的 `execute_task` 解出并 `otel_context.attach`（memory_engine.py:4604-4623）。
+**tracing（tracing.py）**：OTLP HTTP exporter，`HINDSIGHT_API_OTEL_TRACES_ENABLED` + `HINDSIGHT_API_OTEL_EXPORTER_OTLP_ENDPOINT`（默认均关）。span 层级：HTTP server span 按操作**改名**（`hindsight.recall/retain/reflect/...`，`_name_server_span_after_operation` http.py:5261-5290，让 trace 标题是操作而非 URL 模板）→ engine 的 `hindsight.*` 父 span → GenAI 语义规范的 LLM 子 span（prompt/completion 以事件附带，内容截断 10 万字符）→ reflect 的 per-tool span。跨进程续 trace：入队时把 W3C traceparent 注进 payload 的 `_traceparent` 键，worker 的 `execute_task` 解出并 `otel_context.attach`（memory_engine.py:4604-4623）。
 
 **liveness vs readiness（liveness.py + 路由）**：`/health/live` 只回答"进程是否 wedged"，**永不触库**（模块 docstring：一个 `SELECT 1` 存活探针会把数据库退化放大成全量重启风暴——所有 pod 同时被杀，已认领任务集体重新入队冲向失败悬崖）；`/health`/`/health/ready` 查 `memory.health_check()`，不健康回 503，用于**挡流量**而非重启进程。worker 侧同款三分法，外加 `seconds_since_last_poll` 仅供告警、永不影响状态码。
 
@@ -475,11 +475,11 @@ def build_controller_from_config(config) -> AdmissionController:
 
 **cancellation（三跳传播，cancellation.py + api/disconnect.py）**：① `ClientDisconnectCancellationMiddleware`（纯 ASGI，装在 BaseHTTPMiddleware 之外，因为后者的内存流会让 `is_disconnected()` 永远不触发，#2122）只在 `/memories/recall`、`/reflect` 上监听原始 `receive` 的 `http.disconnect`；② 令牌挂 `scope["hindsight.cancellation_token"]`，handler 经 `run_cancellable_on_disconnect` 注入 `RequestContext.cancellation`，engine 在**阶段边界**轮询 `raise_if_cancelled()`（已进入 executor 线程的图扩展/重排计算无法被取消——协作式设计的边界）；③ 捕获 `OperationCancelledError` 转 HTTP 499。`OperationCancelledError` 刻意继承 `Exception` 而非 BaseException——引擎里大量 `except Exception` 需要显式重抛它，且 `gather(return_exceptions=True)` 的结果分类依赖 isinstance（cancellation.py:25-40）。
 
-**profiling 与 http_probe**：`HINDSIGHT_API_PROFILE`（JSON）驱动进程级 cProfile 周期性把**窗口增量**打进日志流（理由：`kubectl logs --previous` 比 file 活得久）；v0.10.2 起 `create_app` 也装一次 profiling（http.py:4981-4985）——`--workers N` 时 uvicorn 子进程 import app 但从不跑 `main()`，只在 main 装会 profile 到什么也不干的 supervisor；`http_probe.py` 是 stdlib-only 的探活小工具（禁止 import 引擎/三方包，有测试守卫），替换掉运行时镜像里的 curl（消 9 个 HIGH CVE）。
+**profiling 与 http_probe**：`HINDSIGHT_API_PROFILE`（JSON）驱动进程级 cProfile 周期性把**窗口增量**打进日志流（理由：`kubectl logs --previous` 比 file 活得久）；v0.10.2 起 `create_app` 也装一次 profiling（http.py:4983-4987）——`--workers N` 时 uvicorn 子进程 import app 但从不跑 `main()`，只在 main 装会 profile 到什么也不干的 supervisor；`http_probe.py` 是 stdlib-only 的探活小工具（禁止 import 引擎/三方包，有测试守卫），替换掉运行时镜像里的 curl（消 9 个 HIGH CVE）。
 
 ## 3.6 扩展槽位：6 个插口、一条加载协议
 
-加载协议（`hindsight_api/extensions/loader.py:72` 起）：读 `HINDSIGHT_API_{PREFIX}_EXTENSION` 环境变量 → 值为 `"module.path:ClassName"` → importlib 导入并校验 `issubclass(base_class)` → 把**所有** `HINDSIGHT_API_{PREFIX}_*` 环境变量（去掉 `_EXTENSION` 本身）剥前缀小写成 config dict → 实例化并 `set_context`。加载点分布：TENANT/OPERATION_VALIDATOR 在四个入口各自加载（main.py:367-375、server.py:58-65、worker/main.py:269-279、admin/cli.py:308）；HTTP 在 create_http_app（http.py:4989-4994）；MCP 在 `create_mcp_server`（mcp.py:199-203）；MEMORY_DEFENSE 与 MEMORIES 由 engine 自己加载兜底（memory_engine.py:3094-3122、engine/memories/__init__.py:47-59）。
+加载协议（`hindsight_api/extensions/loader.py:72` 起）：读 `HINDSIGHT_API_{PREFIX}_EXTENSION` 环境变量 → 值为 `"module.path:ClassName"` → importlib 导入并校验 `issubclass(base_class)` → 把**所有** `HINDSIGHT_API_{PREFIX}_*` 环境变量（去掉 `_EXTENSION` 本身）剥前缀小写成 config dict → 实例化并 `set_context`。加载点分布：TENANT/OPERATION_VALIDATOR 在四个入口各自加载（main.py:367-375、server.py:58-65、worker/main.py:269-279、admin/cli.py:308）；HTTP 在 create_http_app（http.py:4991-4996）；MCP 在 `create_mcp_server`（mcp.py:199-203）；MEMORY_DEFENSE 与 MEMORIES 由 engine 自己加载兜底（memory_engine.py:3094-3122、engine/memories/__init__.py:47-59）。
 
 | 槽位 | 抽象类（file:line） | 钩子 | 官方实现 |
 |---|---|---|---|
@@ -490,19 +490,19 @@ def build_controller_from_config(config) -> AdmissionController:
 | MEMORY_DEFENSE | `MemoryDefenseExtension`（extensions/memory_defense.py:336） | `screen(policy, bank_id, document_id, content, tags)` → allow/redact/block | 内置 `MemoryDefenseRegexExtension`（约 40 模式的密钥/PII 目录 + Luhn 卡号校验） |
 | MEMORIES | `MemoriesExtension`（engine/memories/base.py:1012） | 整个存储+检索面（写入路径、recall 各臂、寻址读、维护），`store_owned` 极性标志 | 默认 `PostgresMemories`（v0.10.2 起实现拆在 `engine/memories/pg/` 包内，#4969/#4979） |
 
-实例化后的全程装配：`MemoryEngine.__init__`（memory_engine.py:2485 起）给 validator 套计时 instrumentation（validator_instrumentation.py:66，逐钩子记 `hindsight.validator.phase.duration`）、给 tenant/validator 补 `set_context`（它们在 engine 之前构造）、构建 `DefaultExtensionContext`（给扩展受控的 `run_migration`/`get_memory_engine` API；基类 `ExtensionContext` 在 context.py:11，默认实现 `DefaultExtensionContext` 在 context.py:76）。memory defense 在 retain 编排器里逐内容项执行（engine/retain/orchestrator.py:1560 起）：REDACT 会重写内容对象与原始 dict（落库前），BLOCK 累积违规，全阻断 → `MemoryDefenseAllBlockedError` → HTTP 422。
+实例化后的全程装配：`MemoryEngine.__init__`（memory_engine.py:2485 起）给 validator 套计时 instrumentation（validator_instrumentation.py:66，逐钩子记 `hindsight.validator.phase.duration`）、给 tenant/validator 补 `set_context`（它们在 engine 之前构造）、构建 `DefaultExtensionContext`（给扩展受控的 `run_migration`/`get_memory_engine` API；基类 `ExtensionContext` 在 context.py:11，默认实现 `DefaultExtensionContext` 在 context.py:76）。memory defense 在 retain 编排器里逐内容项执行（engine/retain/orchestrator.py:1563 起）：REDACT 会重写内容对象与原始 dict（落库前），BLOCK 累积违规，全阻断 → `MemoryDefenseAllBlockedError` → HTTP 422。
 
 ## 3.7 bank 隔离在 API 层的体现
 
 - **HTTP 面**：所有业务路由的 `{bank_id}` 是显式路径参数；请求进入 engine 前第一个引擎级动作是 `_authenticate_tenant`（memory_engine.py:3517-3564）：`request_context.internal`（后台/worker 任务）与 `mcp_authenticated`（传输层已验）直接复用当前 schema，否则调 `tenant_extension.authenticate` 并把 `_current_schema` ContextVar 设为租户 schema——之后**所有** SQL 通过 `fq_table` 按此 contextvar 加 schema 前缀。v0.10.2 起鉴权结果还缓存在 `request_context.authenticated_schema` 上：别名解析（route class）、`precheck_for`、端点自身调用会连续触发鉴权，缓存让第二个及以后的调用直接复用 schema，省掉重复的租户查询（复用分支 3555-3557，鉴权成功后回写缓存 3563，注释 3550-3554）。engine 内该鉴权调用有 95 处（每个公开引擎方法开头）。
-- **MCP 面**：bank_id 解析链 = 路径段（单 bank 模式）> `X-Bank-Id` 头 > `HINDSIGHT_MCP_BANK_ID`（默认 "default"）；鉴权成功后 `_current_schema.set(tenant_context.schema_name)`（mcp.py:490），随后把 bank_id/租户/密钥/额外头全部放入 ContextVar（538-548），工具执行时经 resolver 组装 `RequestContext`。
+- **MCP 面**：bank_id 解析链 = 路径段（单 bank 模式）> `X-Bank-Id` 头 > `HINDSIGHT_MCP_BANK_ID`（默认 "default"）；鉴权成功后 `_current_schema.set(tenant_context.schema_name)`（mcp.py:490），随后把 bank_id/租户/密钥/额外头全部放入 ContextVar（543-552），工具执行时经 resolver 组装 `RequestContext`。
 - **Worker 面**：租户扩展的 `list_tenants()` 每轮轮询动态发现 schema（poller.py:409-413）；认领的行带着 `schema` 上下文，执行前 `task.task_dict["_schema"] = task.schema`（poller.py:1208），engine 的 `_execute_task` 弹出并设 ContextVar（memory_engine.py:4630-4632）。worker/main.py:270-274 注释警示：租户扩展必须在建 engine 之前加载，否则 `_authenticate_tenant` 会把 schema 重置回 "public"，worker 写入落错 schema。
 - **维护扇出**：迁移（`hindsight-admin run-db-migration` 遍历 base + 全部租户 schema）、备份/恢复、`delete_bank` 的扩展表清扫（`extra_bank_tables` 声明 `BankScopedTable` 描述符）都沿租户列表循环。
 - bank 间无交叉查询；bank 级调度公平（3.2 的 bank 轮转）与 bank 级串行化（bank_serialization_sql）都在 SQL 谓词层实现，而非进程锁。
 
 ## 3.8 生产部署形态与多副本注意
 
-- **单进程能跑**：`hindsight-api` + `HINDSIGHT_API_DATABASE_URL=pg0://...`（embedded Postgres，需 `embedded-db` extra）即全家桶——REST、MCP、poller、迁移（`run_migrations_on_startup` 默认开）都在一个进程。Docker standalone 镜像即此形态（外加同容器的控制面 node 进程）。
+- **单进程能跑**：`hindsight-api` + `HINDSIGHT_API_DATABASE_URL=pg0://...`（embedded Postgres，需 `embedded-db` extra，且要求 `pg0-embedded>=0.15.2`——0.10.2 后期 #5194 抬高的最低版本）即全家桶——REST、MCP、poller、迁移（`run_migrations_on_startup` 默认开）都在一个进程。Docker standalone 镜像即此形态（外加同容器的控制面 node 进程）。
 - **多副本要留意**：
   1. 迁移幂等，多个 uvicorn child 各自 import `server.py` 时都会跑一遍（server.py:69 注释明说 safe）；多副本 API 无共享内存状态（准入/信号量均为进程内 asyncio 对象），可横向扩。分布式互斥靠 schema 级 advisory lock（migrations.py:535，`pg_try_advisory_lock` 轮询而非阻塞——持锁连接不能留未提交事务，否则 CREATE INDEX CONCURRENTLY 死锁）；v0.10.2 起迁移失败也会释放锁：先回滚中止的事务再 `pg_advisory_unlock`、解锁失败只记日志不吞原始错误，等待方现在会周期性打出持锁者信息（pg_locks + pg_stat_activity）而非无声挂起（#4623/#4611）。
   2. 准入限额按进程计（admission.py:33-35），容量规划按 `副本数 × 每进程限额`。
@@ -537,7 +537,7 @@ flowchart LR
     REPLAY --> TGT[("目标 bank")]
 ```
 
-**API 面**（http.py，见 1.4 的 Bank Transfer 组）：`transfer/export`（8941）三个 include 标志（`include_data/include_bank_config/include_history`，默认 true/true/false），传 `document_id` 则退化为文档子集（此时禁 bank 级 section，400）；`transfer/import`（9025）分 `mode=restore`（默认，**目标 bank 必须不存在**——恢复而非合并）与 `mode=merge`（文档并入本 bank，`document_conflict=skip|replace|new-id`；merge 拒绝一切 scope 标志，只吃文档）；`clone`（9131）= 导出+导入背靠背且归档不出进程，受 export/import 两个开关共同把门（任一半关即 404）。旧文档级端点 `document-transfer{,/export}`（8867/8803）保留原形状，同步 `GET`（8773）恒 410。
+**API 面**（http.py，见 1.4 的 Bank Transfer 组）：`transfer/export`（8943）三个 include 标志（`include_data/include_bank_config/include_history`，默认 true/true/false），传 `document_id` 则退化为文档子集（此时禁 bank 级 section，400）；`transfer/import`（9027）分 `mode=restore`（默认，**目标 bank 必须不存在**——恢复而非合并）与 `mode=merge`（文档并入本 bank，`document_conflict=skip|replace|new-id`；merge 拒绝一切 scope 标志，只吃文档）；`clone`（9133）= 导出+导入背靠背且归档不出进程，受 export/import 两个开关共同把门（任一半关即 404）。旧文档级端点 `document-transfer{,/export}`（8869/8805）保留原形状，同步 `GET`（8775）恒 410。
 
 **归档格式与表分类**（transfer/export.py、schema.py）：每个 bank-scoped 表必须落入三类之一（`test_export_bank_covers_schema` 守卫，export.py:56-58——未来迁移加的表不可能被静默漏出归档）：
 
@@ -583,7 +583,7 @@ sequenceDiagram
 
 **bank 别名（#4706/#4724）**：`bank_id` 是所有 bank-scoped 表的文本外键，改名=全表重写+停机（`hindsight-admin rename-bank`）。别名是零停机替代：`bank_aliases` 表（迁移 `c8d1e4f7a20b`，alias 为 PK 天然防两 bank 抢名；`d4f8b1c6e903` 加 `is_primary`，一个 bank 至多在一个别名下展示）让一个 bank 同时应答多个 id。解析做在两个**入口边**：
 - REST：`UnknownParamsRoute.get_route_handler` 在路由已解析、FastAPI 取路径参数**之前**把别名重写回 canonical id（unknown_params.py:131-167）。必须在 engine 之外做：约 337 处 `WHERE bank_id = $1` 从不经过 engine 的 bank 助手；解析失败静默吞掉（解析不了不得把真 bank 变 500，未解析 id 行为与无别名时代完全一致）。旧 id 记进 scope 的 `SCOPE_RESOLVED_ALIAS`（observability.py:44）供日志/追踪辨认调用方发的是哪个 id。
-- MCP：连接进入时解析一次（mcp.py:522-536），此后 contextvar 里只有 canonical id。
+- MCP：连接进入时解析一次（mcp.py:522-541），此后 contextvar 里只有 canonical id。这次查找本身会**重新鉴权**（`resolve_bank_alias` 先跑 `_authenticate_tenant`，memory_engine.py:20371，别名按 schema 存放、schema 来自鉴权）——0.10.2 后期起（#5240）该查找的 `RequestContext` 会带上白名单透传头（`extra_headers=dict(passthrough_headers)`，mcp.py:531-541）：此前靠头鉴权的租户扩展在别名查找里拿不到头、查找抛错，连接退回"按原样使用 id"，真 bank 的别名就此解析失败；透传后查找与工具执行看到同一套头。
 - 兼容：别名不随归档导出（见上）；`hindsight-admin rename-bank` 按目录里 bank_id 列名枚举表，rename 天然保留别名。
 
 **迁移面**：本版迁移目录 104→110 个文件，新增 6 个：`b8d3f1a6c2e4`（mental_models.last_refresh_failed_at，失败刷新落定不空转，#4618）、`c8d1e4f7a20b`/`d4f8b1c6e903`（bank_aliases 及 is_primary）、`7c2e5a9d1f40`（entities trgm 索引加 bank 前缀，模糊探测留在本 bank，#4775）、`a6c4e8f1b203`（llm_requests 推理 token 列，#4745）、`e5b1c7d3a902`（merge 双头）。`async_operations` 本身无列变化。
@@ -600,7 +600,7 @@ sequenceDiagram
 # 第 4 层【必答问题速答】
 
 1. **REST 端点地图 / MCP 工具**：见 1.4（99 条路由，10 大组）与 1.3（MCP 39 工具全量 / 单 bank 36）。
-2. **retain/recall/reflect 同异步**：recall、reflect 只有同步形态（disconnect 可取消）；retain 是同步/异步二合一（`async` 参数），异步路径 HTTP 200 + body `async:true` + `operation_id`，客户端轮询 operations。幂等键仅 async retain 有（客户端自选 UUID 作 parent operation_id，重放不重复入库，memory_engine.py:22119-22146）；其他异步操作靠提交期 dedupe（bank 级或 payload 键级）。
+2. **retain/recall/reflect 同异步**：recall、reflect 只有同步形态（disconnect 可取消）；retain 是同步/异步二合一（`async` 参数），异步路径 HTTP 200 + body `async:true` + `operation_id`，客户端轮询 operations。幂等键仅 async retain 有（客户端自选 UUID 作 parent operation_id，重放不重复入库，memory_engine.py:22145-22172）；其他异步操作靠提交期 dedupe（bank 级或 payload 键级）。
 3. **任务系统**：队列表 `async_operations`（3.1）；认领 = 轮询 schema 扫描 + rot/fifo 单语句 `FOR UPDATE SKIP LOCKED` + `mark_operations_processing`（3.2）；失败恢复 = retry/defer/backpressure/wall-timeout/startup-shutdown 双向回收（3.3）；import-bank 的崩溃重试语义见 3.9。worker 与 API 共表共代码，默认同进程、可分离。
 4. **扩展槽位**：6 个（TENANT / OPERATION_VALIDATOR / HTTP / MCP / MEMORY_DEFENSE / MEMORIES），env-var 驱动的 import-string 加载协议 + config 前缀收集（3.6）。
 5. **生产形态**：单进程可跑（pg0 内嵌）；多副本注意迁移幂等、准入按进程、metrics 多 worker 合并、worker_id 稳定性、按副本放大槽位（3.8）。
@@ -609,7 +609,7 @@ sequenceDiagram
 
 # 第 5 层【未能确认 / 存疑】
 
-1. （已结案）`async_operations.status` 的 CHECK 约束扩入 `cancelled`：初始迁移只列四态（5a366d414dce:237-239），`i4j5k6l7m8n9_add_cancelled_status_to_async_operations.py:28-31` 以 DROP 旧约束 + ADD 新约束的方式扩为五值（'pending','processing','completed','failed','cancelled'）。`cancelled` 的写入点：worker 侧父聚合置 cancelled 在 `worker/poller.py:989`，API 侧 `cancel_operation` 在 `engine/memory_engine.py:21166`（UPDATE 带 `status IN ('pending','processing')` 守卫重查，21219-21221）。
+1. （已结案）`async_operations.status` 的 CHECK 约束扩入 `cancelled`：初始迁移只列四态（5a366d414dce:237-239），`i4j5k6l7m8n9_add_cancelled_status_to_async_operations.py:28-31` 以 DROP 旧约束 + ADD 新约束的方式扩为五值（'pending','processing','completed','failed','cancelled'）。`cancelled` 的写入点：worker 侧父聚合置 cancelled 在 `worker/poller.py:989`，API 侧 `cancel_operation` 在 `engine/memory_engine.py:21192`（UPDATE 带 `status IN ('pending','processing')` 守卫重查，21248-21249）。
 2. `OperationValidatorExtension.validate_consolidate / on_consolidate_complete`：接口已发布、api-slim 全库 grep 无调用点（子代理核实）；推测为闭源云版使用，但无法在 OSS 内证实其存在。
 3. `mcp_tools.py` 顶部 docstring 称 `hindsight-local-mcp` 为 stdio transport，与 `mcp_local.py` 自身 docstring（HTTP transport，8888 端口）矛盾——按实现判断 docstring 过时，但不排除存在旧的 stdio 路径历史。
 4. `hindsight-all-npm` 的 `server.ts` 流程（profile create → daemon start → /health 轮询）来自子代理阅读；`hindsight-embed` 各端口/命令解析顺序未逐一复跑。
