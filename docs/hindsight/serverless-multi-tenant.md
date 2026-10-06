@@ -384,7 +384,7 @@ flowchart LR
 
 - **一租户一 schema，一 schema 多 bank**：所有业务表带 `bank_id`，`banks` 表本身不带。租户开通即 `CREATE SCHEMA` + 22 表 + per-bank 索引例程挂载（§4.4）。
 - **运行时强制**：查询文本全部经 `fq_table()`（`engine/schema.py:16-27`），守卫 `validate_sql_schema` 用正则拒绝对受保护表的非限定引用（`memory_engine.py:285-298, 460-510`）——schema 隔离是**集中强制**的；bank 隔离是**每查询约定**（每个 store 方法显式传 bank_id）+ 复合外键/唯一索引的结构性防护。
-- **后台任务带租户**：payload 内嵌 `_schema`，worker 恢复上下文（`memory_engine.py:3968-3971`）；跨租户发现例程在 public schema 唯一副本（`schema.py:30-44`）。
+- **后台任务带租户**：任务行本身位于租户 schema 的 `async_operations` 表中，**行所在的 schema 即租户上下文**；poller 领取时将其注入任务字典（`worker/poller.py:1208`，引擎消费端 `memory_engine.py:4630`）；跨租户发现例程在 public schema 唯一副本（`schema.py:30-44`）。
 - **审计/追踪按 bank**；指标 tenant 标签（=schema 名）默认关闭防基数爆炸，按需开启（`metrics.py:652-660`）。
 - **文件**：原件可走 S3/GCS/Azure 后端（`engine/storage/`），`file_storage` 表记引用——对象存储桶按 Cell 分桶 + 前缀带 tenant/bank，桶策略隔离。
 
