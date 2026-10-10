@@ -1,4 +1,4 @@
-<!-- recall-analysis v4 | build 2026-10-10 12:05 CST | charset+viewport declared | repo push v4 -->
+<!-- recall-analysis v5 | build 2026-10-10 13:30 CST | charset+viewport declared | repo push v5 -->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Recall 流程庖丁解牛</title>
@@ -28,7 +28,7 @@
   }
   body{background:var(--bg); color:var(--fg); font-family:"Noto Sans SC",system-ui,sans-serif;
        font-size:15px; line-height:1.75; margin:0;}
-  .wrap{max-width:920px; margin:0 auto; padding:0 20px;}
+  .wrap{max-width:940px; margin:0 auto; padding:0 20px;}
   header.doc{padding:44px 0 10px;}
   .eyebrow{font-size:12px; letter-spacing:.14em; color:var(--muted); text-transform:uppercase;}
   h1{font-family:"Noto Serif SC",serif; font-weight:700; font-size:34px; line-height:1.25;
@@ -41,19 +41,12 @@
      display:flex; align-items:baseline; gap:12px;}
   h2 .no{font-family:"JetBrains Mono",monospace; font-size:14px; color:var(--prod); font-weight:600;}
   h3{font-size:17px; margin:26px 0 8px;}
-  h4{font-size:15.5px; margin:18px 0 4px;}
   .rule{border:0; border-top:1px solid var(--line); margin:6px 0 18px;}
-  p{margin:10px 0; max-width:72ch;}
+  p{margin:10px 0; max-width:74ch;}
   .muted{color:var(--muted);}
   .chip{display:inline-block; font-size:11px; font-family:"JetBrains Mono",monospace;
         border:1px solid; border-radius:3px; padding:0 7px; line-height:1.7; vertical-align:2px;}
   .chip.unk{color:var(--warn);} .chip.inf{color:var(--muted);}
-  .duo{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:12px 0;}
-  .duo .cell{border:1px solid var(--line); border-radius:4px; padding:10px 12px; background:var(--card); min-width:0;}
-  .duo .cell p{margin:4px 0 0; font-size:13.5px; line-height:1.65;}
-  .tag{font-size:11px; font-weight:700; letter-spacing:.1em;}
-  .tag.u{color:var(--up);} .tag.p{color:var(--prod);}
-  @media (max-width:640px){ .duo{grid-template-columns:1fr;} }
   .tbl{overflow-x:auto; margin:12px 0;}
   table{border-collapse:collapse; width:100%; font-size:13px; line-height:1.6;}
   th{background:var(--code); text-align:left; font-weight:700; white-space:nowrap;}
@@ -67,17 +60,22 @@
   pre.code{background:var(--code); border:1px solid var(--line); border-radius:4px;
            padding:12px 14px; overflow-x:auto; font-size:12.5px; line-height:1.6;
            font-family:"JetBrains Mono",monospace; margin:10px 0;}
+  pre.ascii{background:var(--card); border:1px solid var(--line); border-radius:4px;
+            padding:14px; overflow-x:auto; font-size:12.5px; line-height:1.55;
+            font-family:"JetBrains Mono",monospace; margin:10px 0;}
   figure{margin:20px 0;}
   figure svg{max-width:100%; height:auto; display:block;}
-  figcaption{font-size:13px; color:var(--muted); margin-top:8px; max-width:72ch;}
+  figcaption{font-size:13px; color:var(--muted); margin-top:8px; max-width:74ch;}
   .uBox{fill:var(--up-soft); stroke:var(--up);}
   .pBox{fill:var(--prod-soft); stroke:var(--prod);}
   .nBox{fill:var(--card); stroke:var(--line);}
   .dBox{fill:none; stroke:var(--muted); stroke-dasharray:4 3;}
+  .xBox{fill:var(--up-soft); stroke:var(--up); stroke-dasharray:5 3;}
   svg text{fill:var(--fg); font-family:"Noto Sans SC",system-ui,sans-serif;}
   svg .mono{font-family:"JetBrains Mono",monospace;}
   svg .arr{stroke:var(--muted); fill:none; stroke-width:1.4;}
   svg .small{font-size:11px; fill:var(--muted);}
+  svg .tiny{font-size:10px; fill:var(--muted);}
   .bSwap{fill:var(--prod-soft); stroke:var(--prod);}
   .bNew{fill:var(--prod); stroke:var(--prod);}
   .bKeep{fill:var(--card); stroke:var(--line);}
@@ -90,17 +88,17 @@
   footer{margin:50px 0 30px; padding-top:14px; border-top:1px solid var(--line);
          font-size:12.5px; color:var(--muted);}
   ul{margin:8px 0; padding-left:22px;} li{margin:4px 0;}
-  ol.story{padding-left:22px;} ol.story li{margin:6px 0;}
+  ol.story{padding-left:22px;} ol.story li{margin:5px 0;}
 </style>
 
 <div class="wrap">
 <header class="doc">
-  <div class="eyebrow">doc-06 × S1 设计 × contextdb 现实 · v4 · 2026-10-10</div>
+  <div class="eyebrow">doc-06 × S1 设计 × contextdb 现实 · v5 · 2026-10-10</div>
   <h1>Recall 流程庖丁解牛</h1>
-  <p class="standfirst">开源 Hindsight 与 agentstratum 的每一处差异:流程图上逐节点标注改造程度和影响;31 条用户可见差异全清单;四臂变两臂的成因与后果;能力补齐按「需要什么→要做什么→怎么算完成」逐项写清。8 个核查 subagent 五轮交叉审查。</p>
+  <p class="standfirst">三步看懂开源与 agentstratum 的差异:①开源完整流程(24 步不遗漏)②产品完整流程(24 步,逐节点标差异)③一张大对比图对齐逐行差异,再拆「数据源/流程/接口」三张小图。全部结论经 8 个核查 subagent 五轮交叉审查。</p>
   <div class="meta">
     <span>HEAD abea5ed</span><span>vendor = v0.10.2 · eb021da</span><span>doc-06 = v0.10.3</span>
-    <span>5 轮核查</span><span>修正初稿 20+ 处</span>
+    <span>6 幅图</span><span>31 条差异</span><span>修正初稿 20+ 处</span>
   </div>
 </header>
 
@@ -108,267 +106,387 @@
 <hr class="rule">
 <div class="tbl"><table>
   <tr><th>对象</th><th>版本 / 基线</th><th>说明</th></tr>
-  <tr><td>doc-06</td><td>上游 v0.10.3 · <code>6d8b09678</code></td><td>《06 · API 层与服务形态》;行号与 vendor 漂移 150-200 行</td></tr>
-  <tr><td>产品内核</td><td>vendor <code>eb021da</code> = v0.10.2</td><td>引用 vendor 按 0.10.2 实测行号</td></tr>
-  <tr><td>关键陷阱</td><td>vendor 不是纯上游</td><td>含产品 seam(<code>engine/schema.py:20-41</code> fail-closed 守卫)</td></tr>
+  <tr><td>doc-06</td><td>上游 v0.10.3 · <code>6d8b09678</code></td><td>《06 · API 层与服务形态》</td></tr>
+  <tr><td>产品内核</td><td>vendor <code>eb021da</code> = v0.10.2</td><td>vendor 引用按 0.10.2 实测行号</td></tr>
+  <tr><td>关键陷阱</td><td>vendor 不是纯上游</td><td>含产品 seam(<code>engine/schema.py:20-41</code>)</td></tr>
 </table></div>
+<p class="muted">徽章:<b class="g-swap">替</b>=新机制取代 · <b class="g-new">新</b>=上游没有 · <b class="g-keep">留</b>=vendor 原码零改动 · <b class="g-rewrite">改</b>=vendor 源内修改 · <b class="g-off">闭</b>=能力移除 · <b class="g-keep">同</b>=两边一致。</p>
 
-<h2><span class="no">1</span>全景图:每个节点标出差异与影响</h2>
+<h2><span class="no">1</span>图一 · 开源 Hindsight 完整流程(27 步,一步不漏)</h2>
 <hr class="rule">
-<p>徽章:<b class="g-swap">替</b>=新机制取代上游 · <b class="g-new">新</b>=上游没有 · <b class="g-keep">留</b>=vendor 原码零改动 · <b class="g-rewrite">改</b>=vendor 源内修改 · <b class="g-off">闭</b>=能力移除。每框第二行是该差异的<b>影响</b>。</p>
-
 <figure>
-<svg viewBox="0 0 780 300" role="img" aria-label="上游 recall 基线流程:单体进程、四臂并行、RRF、开放响应">
-  <defs><marker id="au" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
-  <text x="390" y="20" text-anchor="middle" class="small">开源 Hindsight 基线(v0.10.2/0.10.3)</text>
-  <rect class="nBox" x="230" y="30" width="320" height="34" rx="3"/><text x="390" y="52" text-anchor="middle" font-size="12.5">Client(浏览器 / SDK / MCP)</text>
-  <line class="arr" x1="390" y1="64" x2="390" y2="78" marker-end="url(#au)"/>
-  <rect class="uBox" x="110" y="82" width="560" height="38" rx="3"/><text x="390" y="100" text-anchor="middle" font-size="12.5">单体 FastAPI:REST + MCP + poller · 99 条路由 · API key · 租户 schema ContextVar</text><text x="390" y="115" text-anchor="middle" class="small">别名路由层重写 · admission lane 16/核排队≤30s → 503/499</text>
-  <line class="arr" x1="390" y1="120" x2="390" y2="134" marker-end="url(#au)"/>
-  <rect class="uBox" x="110" y="138" width="560" height="38" rx="3"/><text x="390" y="156" text-anchor="middle" font-size="12.5">api_recall:&gt;500 token → 400 · types 默认全部三种(含 observation)</text><text x="390" y="171" text-anchor="middle" class="small">四臂并行:semantic(地板0.3) | BM25(OR·语言可配) | graph(种子扩展) | temporal(有窗才跑)</text>
-  <line class="arr" x1="390" y1="176" x2="390" y2="190" marker-end="url(#au)"/>
-  <rect class="uBox" x="110" y="194" width="560" height="38" rx="3"/><text x="390" y="212" text-anchor="middle" font-size="12.5">cap(默认关) → RRF k=60 → trim → 取正文 → 重排(cross_encoder 可关降 RRF)</text><text x="390" y="227" text-anchor="middle" class="small">开放响应:entities 默认回取 · audit 异步可关 · 计量回调</text>
-  <line class="arr" x1="390" y1="232" x2="390" y2="246" marker-end="url(#au)"/>
-  <rect class="uBox" x="110" y="250" width="560" height="34" rx="3"/><text x="390" y="272" text-anchor="middle" font-size="12.5">上游无:见证资格复核 · 证据组 · 输出前授权 · 逐帧审计 · 请求关联 ID</text>
+<svg viewBox="0 0 840 1330" role="img" aria-label="开源 recall 完整流程 27 步:入口中间件、依赖解析、引擎入口、四臂检索、融合重排、事后回取与响应旁路">
+  <defs><marker id="m1" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
+  <text x="420" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="var(--up)">开源 Hindsight(v0.10.2/0.10.3)· 单体进程 · 每一步</text>
+
+  <text x="16" y="44" class="tiny">入口</text>
+  <rect class="uBox" x="50" y="30" width="770" height="30" rx="3"/><text x="60" y="50" font-size="11.5">1 Client 发起 POST /v1/default/banks/{bank}/memories/recall</text>
+  <line class="arr" x1="435" y1="60" x2="435" y2="68" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="70" width="770" height="30" rx="3"/><text x="60" y="90" font-size="11.5">2 MCPMiddleware(/mcp 拦截,REST 透传) → 3 Observability(指标,旧正则折叠) → 4 断连中间件(仅 recall/reflect) → 5 GZip</text>
+  <line class="arr" x1="435" y1="100" x2="435" y2="108" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="110" width="770" height="30" rx="3"/><text x="60" y="130" font-size="11.5">6 UnknownParamsRoute:bank 别名重写(失败静默吞)+ 未知参数收集(X-Ignored-Params)</text>
+
+  <text x="16" y="162" class="tiny">依赖</text>
+  <line class="arr" x1="435" y1="140" x2="435" y2="148" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="150" width="770" height="30" rx="3"/><text x="60" y="170" font-size="11.5">7 get_request_context:Authorization 头取 API key(Bearer/裸 key)</text>
+  <line class="arr" x1="435" y1="180" x2="435" y2="188" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="190" width="770" height="30" rx="3"/><text x="60" y="210" font-size="11.5">8 precheck①:_authenticate_tenant → 租户 schema 写入 _current_schema ContextVar(请求内缓存)</text>
+  <line class="arr" x1="435" y1="220" x2="435" y2="228" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="230" width="770" height="30" rx="3"/><text x="60" y="250" font-size="11.5">9 precheck②:OperationValidator.precheck(计费 8 路由之一,body 未读即可 402/429 拒)</text>
+  <line class="arr" x1="435" y1="260" x2="435" y2="268" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="270" width="770" height="30" rx="3"/><text x="60" y="290" font-size="11.5">10 admit_for:recall lane(16/核,排队≤30s)→ 超时 503+Retry-After;排队中断连 499</text>
+
+  <text x="16" y="322" class="tiny">引擎</text>
+  <line class="arr" x1="435" y1="300" x2="435" y2="308" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="310" width="770" height="30" rx="3"/><text x="60" y="330" font-size="11.5">11 body 解析 RecallRequest(pydantic 13 参数;空 query→422)</text>
+  <line class="arr" x1="435" y1="340" x2="435" y2="348" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="350" width="770" height="30" rx="3"/><text x="60" y="370" font-size="11.5">12 api_recall(@audited 注册):query 超 500 token → HTTP 400</text>
+  <line class="arr" x1="435" y1="380" x2="435" y2="388" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="390" width="770" height="30" rx="3"/><text x="60" y="410" font-size="11.5">13 engine.recall_async:sanitize_text 清洗 → 14 引擎入口截断 → 15 _require_bank_exists(404 守卫)</text>
+  <line class="arr" x1="435" y1="420" x2="435" y2="428" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="430" width="770" height="30" rx="3"/><text x="60" y="450" font-size="11.5">16 bank 级三开关解析(enable_text_search/graph/temporal,默认全开)→ 17 types=None 展开全部三种 fact_type</text>
+
+  <text x="16" y="482" class="tiny">四臂</text>
+  <line class="arr" x1="435" y1="460" x2="435" y2="468" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="470" width="770" height="30" rx="3"/><text x="60" y="490" font-size="11.5">18 semantic+BM25 臂:单连接 UNION SQL — 向量 1-(emb&lt;=&gt;q) 地板 0.3;关键词 ts_rank_cd(OR 拼接,语言可配)</text>
+  <line class="arr" x1="435" y1="500" x2="435" y2="508" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="510" width="770" height="30" rx="3"/><text x="60" y="530" font-size="11.5">19 graph 臂:semantic 高分(≥0.3 前 20)当种子 → 一轮三路扩展(实体路 unit_entities | 语义kNN 边 | 因果边)</text>
+  <line class="arr" x1="435" y1="540" x2="435" y2="548" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="550" width="770" height="30" rx="3"/><text x="60" y="570" font-size="11.5">20 temporal 臂:有窗才跑(occurred 区间相交 OR mentioned_at 落窗;排序仍按向量;沿边 spreading)</text>
+
+  <text x="16" y="622" class="tiny">融合</text>
+  <line class="arr" x1="435" y1="580" x2="435" y2="588" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="590" width="770" height="30" rx="3"/><text x="60" y="610" font-size="11.5">21 逐 fact_type 汇总各臂 → cap_per_source(默认关) → RRF(k=60) → trim</text>
+  <line class="arr" x1="435" y1="620" x2="435" y2="628" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="630" width="770" height="30" rx="3"/><text x="60" y="650" font-size="11.5">22 hydrate_results 全量取回正文(重排前最后一个取消检查点) → 23 cross_encoder 重排(派发后不可取消)→ 组合打分</text>
+  <line class="arr" x1="435" y1="660" x2="435" y2="668" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="670" width="770" height="30" rx="3"/><text x="60" y="690" font-size="11.5">24 prefer_observations 去重 → select_facts_within_budget token 预算(只计 text)</text>
+
+  <text x="16" y="742" class="tiny">回取</text>
+  <line class="arr" x1="435" y1="700" x2="435" y2="708" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="710" width="770" height="30" rx="3"/><text x="60" y="730" font-size="11.5">25 entities 回取(默认开);chunks / source_facts(默认关,可开)</text>
+
+  <text x="16" y="782" class="tiny">响应</text>
+  <line class="arr" x1="435" y1="740" x2="435" y2="748" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="750" width="770" height="30" rx="3"/><text x="60" y="770" font-size="11.5">26 RecallResult → RecallResponse 组装(6 键开放填充:results/trace/entities/chunks/source_facts/truncated)</text>
+  <line class="arr" x1="435" y1="780" x2="435" y2="788" marker-end="url(#m1)"/>
+  <rect class="uBox" x="50" y="790" width="770" height="30" rx="3"/><text x="60" y="810" font-size="11.5">27 响应旁路:@audited→audit_log 异步落表(默认关可关);llm_requests 记 LLM 调用;on_recall_complete 计量回调</text>
+
+  <rect class="dBox" x="50" y="840" width="770" height="56" rx="3"/>
+  <text x="60" y="862" class="small">本图刻意不标差异——这是"改动之前的世界"。每个步骤的行号锚点见正文 §6 大表;与产品的逐行差异见 §3 大对比图。</text>
+  <text x="60" y="882" class="small">取消语义:排队中断连 499;执行中断连在阶段边界取消;已进重排线程的计算取消不了。</text>
 </svg>
-<figcaption>图 1 · 开源基线。下图为产品在同一请求路径上的逐节点差异。</figcaption>
+<figcaption>图 1 · 开源完整流程 27 步。来源:doc-06 §1-3 + vendor 0.10.2 逐段实测(五轮核查)。</figcaption>
 </figure>
 
+<h2><span class="no">2</span>图二 · 产品(agentstratum)完整流程(24 步,逐节点标差异)</h2>
+<hr class="rule">
 <figure>
-<svg viewBox="0 0 780 760" role="img" aria-label="产品 recall 流程,14 个节点各带改造徽章与影响:G 网关五处替换,H 端证据链新增,融合预算保留,重排改写,回取关闭">
-  <defs><marker id="ap" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
-  <rect class="nBox" x="230" y="6" width="320" height="30" rx="3"/><text x="390" y="26" text-anchor="middle" font-size="12.5">Client(cookie / bearer)</text>
-  <line class="arr" x1="390" y1="36" x2="390" y2="48" marker-end="url(#ap)"/>
+<svg viewBox="0 0 840 1250" role="img" aria-label="产品 recall 完整流程 24 步,每步带改造徽章:G 网关九步、转发两步、H 服务七步、检索两步、融合重排三步、复核投影一步">
+  <defs><marker id="m2" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
+  <text x="420" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="var(--prod)">agentstratum(contextdb)· 五角色分离 · 每步带徽章与影响</text>
 
-  <rect x="612" y="50" width="24" height="17" rx="3" class="bSwap"/><text class="badgeT" x="624" y="63" text-anchor="middle" fill="var(--prod)">替</text>
-  <rect class="pBox" x="110" y="52" width="560" height="40" rx="3"/><text x="390" y="69" text-anchor="middle" font-size="12.5">① G 网关:仅 2 条查询路由(99→2)</text><text x="390" y="86" text-anchor="middle" class="small">影响:管理端点全不可达;raw/文档无读入口;只读用户目录为空</text>
-  <line class="arr" x1="390" y1="92" x2="390" y2="104" marker-end="url(#ap)"/>
+  <text x="16" y="44" class="tiny">G 网关</text>
+  <rect class="pBox" x="50" y="30" width="770" height="32" rx="3"/><rect class="bSwap" x="784" y="36" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="48" text-anchor="middle" fill="var(--prod)">替</text>
+  <text x="60" y="51" font-size="11.5">1 Client(cookie/bearer)→ 2 query_route 闭集匹配:全库只认 recall|reflect 两条,其余 404</text>
+  <line class="arr" x1="435" y1="62" x2="435" y2="70" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="72" width="770" height="32" rx="3"/><rect class="bNew" x="784" y="78" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="90" text-anchor="middle" class="bNewT">新</text>
+  <text x="60" y="93" font-size="11.5">3 QueryDeadline.ingress:10 秒逻辑总预算(wall+mono 双钟;认证/排队/读体/转发全吃它)</text>
+  <line class="arr" x1="435" y1="104" x2="435" y2="112" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="114" width="770" height="32" rx="3"/><rect class="bSwap" x="784" y="120" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="132" text-anchor="middle" fill="var(--prod)">替</text>
+  <text x="60" y="135" font-size="11.5">4 身份 RPC 第 1 次(Session→MetaPG,无缓存/无连接复用;帽 8/超时 1s)→ 5 四元组 Grant 授权(无 Grant→403)</text>
+  <line class="arr" x1="435" y1="146" x2="435" y2="154" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="156" width="770" height="32" rx="3"/><rect class="bSwap" x="784" y="162" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="174" text-anchor="middle" fill="var(--prod)">替</text>
+  <text x="60" y="177" font-size="11.5">6 governor.admit:global/tenant/subject/action 四层令牌桶+有界队列(进程本地,冷启动 0 令牌)</text>
+  <line class="arr" x1="435" y1="188" x2="435" y2="196" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="198" width="770" height="32" rx="3"/><text x="60" y="219" font-size="11.5">7 读体 ≤65536B(字节预留)→ 8 闭 parse:恰 6 键;未知键 404;query≤8192B→413;trace/prefer=false;reranking=cross_encoder</text>
+  <rect x="784" y="204" width="24" height="16" rx="3" class="bSwap"/><text class="badgeT" x="796" y="216" text-anchor="middle" fill="var(--prod)">替</text>
+  <line class="arr" x1="435" y1="230" x2="435" y2="238" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="240" width="770" height="32" rx="3"/><rect class="bNew" x="784" y="246" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="258" text-anchor="middle" class="bNewT">新</text>
+  <text x="60" y="261" font-size="11.5">9 重身份 RPC 第 2 次+重授权;cookie 死线收紧到 expires_at(≤15s 窗)</text>
 
-  <rect x="612" y="108" width="24" height="17" rx="3" class="bSwap"/><text class="badgeT" x="624" y="121" text-anchor="middle" fill="var(--prod)">替</text>
-  <rect class="pBox" x="110" y="110" width="560" height="40" rx="3"/><text x="390" y="127" text-anchor="middle" font-size="12.5">② 会话认证:每请求 2 次 MetaPG RPC(无缓存/无连接复用)</text><text x="390" y="144" text-anchor="middle" class="small">影响:并发帽 8 · 超时 1s,打满 503;换可审计主体</text>
-  <line class="arr" x1="390" y1="150" x2="390" y2="162" marker-end="url(#ap)"/>
+  <text x="16" y="294" class="tiny">转发</text>
+  <line class="arr" x1="435" y1="272" x2="435" y2="280" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="282" width="770" height="32" rx="3"/><rect class="bNew" x="784" y="288" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="300" text-anchor="middle" class="bNewT">新</text>
+  <text x="60" y="303" font-size="11.5">10 签 18 字段 HMAC 信封(jti=请求 ID,一次性,≤15s)→ 11 转发(aiohttp 禁重试)→ H</text>
 
-  <rect x="612" y="166" width="24" height="17" rx="3" class="bSwap"/><text class="badgeT" x="624" y="179" text-anchor="middle" fill="var(--prod)">替</text>
-  <rect class="pBox" x="110" y="168" width="560" height="40" rx="3"/><text x="390" y="185" text-anchor="middle" font-size="12.5">③ 四元组 Grant(快照指纹;H 每请求真读须等于钉死版本)</text><text x="390" y="202" text-anchor="middle" class="small">影响:漂移 = 每请求 409,直到换快照重启</text>
-  <line class="arr" x1="390" y1="208" x2="390" y2="220" marker-end="url(#ap)"/>
+  <text x="16" y="336" class="tiny">H 服务</text>
+  <line class="arr" x1="435" y1="314" x2="435" y2="322" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="324" width="770" height="32" rx="3"/><rect class="bNew" x="784" y="330" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="342" text-anchor="middle" class="bNewT">新</text>
+  <text x="60" y="345" font-size="11.5">12 verify_bound:验签+jti 防重放+method/path/bank/action/body 绑定+authorize 重查</text>
+  <line class="arr" x1="435" y1="356" x2="435" y2="364" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="366" width="770" height="32" rx="3"/><rect class="bNew" x="784" y="372" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="384" text-anchor="middle" class="bNewT">新</text>
+  <text x="60" y="387" font-size="11.5">13 authority.begin:admission.check+原始字节重 parse+invocation=UUID(jti)+deadline=min(4 项)</text>
+  <line class="arr" x1="435" y1="398" x2="435" y2="406" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="408" width="770" height="32" rx="3"/><rect class="bNew" x="784" y="414" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="426" text-anchor="middle" class="bNewT">新</text>
+  <text x="60" y="429" font-size="11.5">14 当前 Meta 读(PG#1)+ModelBinding 五元组过滤恰一(recall:embed+rerank)→ 15 PRE_FACTORY preflight(PG#2)+audit START</text>
+  <line class="arr" x1="435" y1="440" x2="435" y2="448" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="450" width="770" height="32" rx="3"/><rect class="bNew" x="784" y="456" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="468" text-anchor="middle" class="bNewT">新</text>
+  <text x="60" y="471" font-size="11.5">16 host 白名单:capabilities=[QP01,QP03,QP07,recall,done]+settings 9 键+space/dimension 对 binding</text>
+  <line class="arr" x1="435" y1="482" x2="435" y2="490" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="492" width="770" height="30" rx="3"/><text x="60" y="512" font-size="11.5">17 engine.recall_async → vendor 检测 _native_query_host → 整段移交 host.recall(参数白名单 13 项全拒)</text>
+  <rect x="784" y="497" width="24" height="16" rx="3" class="bKeep"/><text class="badgeT" x="796" y="509" text-anchor="middle" fill="var(--muted)">同</text>
 
-  <rect x="612" y="224" width="24" height="17" rx="3" class="bSwap"/><text class="badgeT" x="624" y="237" text-anchor="middle" fill="var(--prod)">替</text>
-  <rect class="pBox" x="110" y="226" width="560" height="40" rx="3"/><text x="390" y="243" text-anchor="middle" font-size="12.5">④ governor 四层令牌桶 + ⑤ 闭 parse(未知键 404)</text><text x="390" y="260" text-anchor="middle" class="small">影响:进程本地冷启动 0 令牌;多传一个参数=整请求被拒</text>
-  <line class="arr" x1="390" y1="266" x2="390" y2="278" marker-end="url(#ap)"/>
+  <text x="16" y="544" class="tiny">检索</text>
+  <line class="arr" x1="435" y1="522" x2="435" y2="530" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="532" width="770" height="32" rx="3"/><rect class="bSwap" x="784" y="538" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="550" text-anchor="middle" fill="var(--prod)">替</text>
+  <text x="60" y="553" font-size="11.5">18 embed 发送检查(Meta+preflight,PG#3,4)→ L.embed(input_type=query,维度/空间复核;多 provider 栈不可达)</text>
+  <line class="arr" x1="435" y1="564" x2="435" y2="572" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="574" width="770" height="32" rx="3"/><rect class="bSwap" x="784" y="580" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="592" text-anchor="middle" fill="var(--prod)">替</text>
+  <text x="60" y="595" font-size="11.5">19 QP01 search(PG#5,guard 内联):semantic(无地板)+keyword(plainto AND·english 钉死)→ QP03 水合(PG#6)→ 证据组登记</text>
 
-  <rect x="612" y="282" width="24" height="17" rx="3" class="bNew"/><text class="badgeT" x="624" y="295" text-anchor="middle" class="bNewT">新</text>
-  <rect class="pBox" x="110" y="284" width="560" height="40" rx="3"/><text x="390" y="301" text-anchor="middle" font-size="12.5">⑥ HMAC 信封(jti 一次性,≤15s)→ H 验封+授权重查</text><text x="390" y="318" text-anchor="middle" class="small">影响:多一跳网络+签名设施;G↔H 必须同机房(10s 总账内)</text>
-  <line class="arr" x1="390" y1="324" x2="390" y2="336" marker-end="url(#ap)"/>
+  <text x="16" y="628" class="tiny">融合</text>
+  <line class="arr" x1="435" y1="606" x2="435" y2="614" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="616" width="770" height="30" rx="3"/><text x="60" y="636" font-size="11.5">20 cap/RRF/trim:直调 vendor 原码(git 零改动——与上游完全同行为)</text>
+  <rect x="784" y="621" width="24" height="16" rx="3" class="bKeep"/><text class="badgeT" x="796" y="633" text-anchor="middle" fill="var(--muted)">留</text>
+  <line class="arr" x1="435" y1="646" x2="435" y2="654" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="656" width="770" height="32" rx="3"/><rect class="bRew" x="784" y="662" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="674" text-anchor="middle" fill="var(--up)">改</text>
+  <text x="60" y="677" font-size="11.5">21 重排发送检查(Meta+preflight+QP07,PG#7-9)→ L.rerank(强制 cross_encoder;输入记血缘;超时报错不降级 RRF)</text>
+  <line class="arr" x1="435" y1="688" x2="435" y2="696" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="698" width="770" height="30" rx="3"/><text x="60" y="718" font-size="11.5">22 combined scoring(recency boost,时间项恒中性)→ token 预算选择(vendor 原码)</text>
+  <rect x="784" y="703" width="24" height="16" rx="3" class="bKeep"/><text class="badgeT" x="796" y="715" text-anchor="middle" fill="var(--muted)">留</text>
 
-  <rect x="612" y="340" width="24" height="17" rx="3" class="bNew"/><text class="badgeT" x="624" y="353" text-anchor="middle" class="bNewT">新</text>
-  <rect class="pBox" x="110" y="342" width="560" height="40" rx="3"/><text x="390" y="359" text-anchor="middle" font-size="12.5">⑦ Authority:ModelBinding 恰一 + PRE_FACTORY_PG 预检(失败 409)</text><text x="390" y="376" text-anchor="middle" class="small">影响:换模型=快照+activation+profile 一次完整控制面变更</text>
-  <line class="arr" x1="390" y1="382" x2="390" y2="394" marker-end="url(#ap)"/>
+  <text x="16" y="750" class="tiny">复核</text>
+  <line class="arr" x1="435" y1="728" x2="435" y2="736" marker-end="url(#m2)"/>
+  <rect class="pBox" x="50" y="738" width="770" height="32" rx="3"/><rect class="bNew" x="784" y="744" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="756" text-anchor="middle" class="bNewT">新</text>
+  <text x="60" y="759" font-size="11.5">23 final_check:output 授权+preflight+逐组 QP07(PG#10-12);失败→抑制整个答案→503 UNKNOWN(计次保留)</text>
+  <line class="arr" x1="435" y1="770" x2="435" y2="778" marker-end="url(#m2)"/>
+  <rect class="dBox" x="50" y="780" width="770" height="34" rx="3"/><rect class="bRew" x="784" y="786" width="24" height="16" rx="3"/><text class="badgeT" x="796" y="798" text-anchor="middle" fill="var(--up)">闭</text>
+  <text x="60" y="801" font-size="11.5">24 闭投影(5 键恒 null,scores 从不出现,usage 仅错误帧)→ audit 逐帧 fsync(失败锁 Unit)→ G 校验 → G 末帧复核 → 回传</text>
 
-  <rect x="612" y="398" width="24" height="17" rx="3" class="bNew"/><text class="badgeT" x="624" y="411" text-anchor="middle" class="bNewT">新</text>
-  <rect class="pBox" x="110" y="400" width="560" height="40" rx="3"/><text x="390" y="417" text-anchor="middle" font-size="12.5">⑧ host 白名单 [QP01,QP03,QP07,recall,done] → L.embed</text><text x="390" y="434" text-anchor="middle" class="small">影响:能力面编译期封存;加能力=新 pair 注册(不是开关)</text>
-  <line class="arr" x1="390" y1="440" x2="390" y2="452" marker-end="url(#ap)"/>
-
-  <rect x="612" y="456" width="24" height="17" rx="3" class="bSwap"/><text class="badgeT" x="624" y="469" text-anchor="middle" fill="var(--prod)">替</text>
-  <rect class="pBox" x="110" y="458" width="560" height="40" rx="3"/><text x="390" y="475" text-anchor="middle" font-size="12.5">⑨ 两臂 QP01:semantic(无地板) + keyword(AND·english 钉死)</text><text x="390" y="492" text-anchor="middle" class="small">影响:编号/关联/时间/中文四类查询行为改变(见专章四案例)</text>
-  <line class="arr" x1="390" y1="498" x2="390" y2="510" marker-end="url(#ap)"/>
-
-  <rect x="612" y="514" width="24" height="17" rx="3" class="bNew"/><text class="badgeT" x="624" y="527" text-anchor="middle" class="bNewT">新</text>
-  <rect class="pBox" x="110" y="516" width="560" height="40" rx="3"/><text x="390" y="533" text-anchor="middle" font-size="12.5">⑩ QP03 带见证水合(全有全无)+ 证据组登记(gate 串行)</text><text x="390" y="550" text-anchor="middle" class="small">影响:单次召回约 12 次 PG 往返起步;帽 8 组/200 条;换可审计证据链</text>
-  <line class="arr" x1="390" y1="556" x2="390" y2="568" marker-end="url(#ap)"/>
-
-  <rect x="612" y="572" width="24" height="17" rx="3" class="bKeep"/><text class="badgeT" x="624" y="585" text-anchor="middle" fill="var(--muted)">留</text>
-  <rect class="pBox" x="110" y="574" width="560" height="36" rx="3"/><text x="390" y="591" text-anchor="middle" font-size="12.5">⑪ cap/RRF/trim(经 seam 直调 vendor 原码,git 零改动)</text><text x="390" y="606" text-anchor="middle" class="small">影响:无(与上游同行为)</text>
-  <line class="arr" x1="390" y1="610" x2="390" y2="622" marker-end="url(#ap)"/>
-
-  <rect x="612" y="626" width="24" height="17" rx="3" class="bRew"/><text class="badgeT" x="624" y="639" text-anchor="middle" fill="var(--up)">改</text>
-  <rect class="pBox" x="110" y="628" width="560" height="40" rx="3"/><text x="390" y="645" text-anchor="middle" font-size="12.5">⑫ CrossEncoder(L rerank;reranking.py 源已改写:血缘挂钩)</text><text x="390" y="662" text-anchor="middle" class="small">影响:每次重排多一轮发送前检查;超时不再降级 RRF 而是报错</text>
-  <line class="arr" x1="390" y1="668" x2="390" y2="680" marker-end="url(#ap)"/>
-
-  <rect x="612" y="684" width="24" height="17" rx="3" class="bNew"/><text class="badgeT" x="624" y="697" text-anchor="middle" class="bNewT">新</text>
-  <rect class="pBox" x="110" y="686" width="560" height="40" rx="3"/><text x="390" y="703" text-anchor="middle" font-size="12.5">⑬ final_check(输出前 QP07+输出授权)+ G 末帧复核</text><text x="390" y="720" text-anchor="middle" class="small">影响:迟到撤权 → 整个答案被抑制成 503(已花的调用作废,计次保留)</text>
-
-  <rect x="662" y="734" width="24" height="17" rx="3" class="bRew"/><text class="badgeT" x="674" y="747" text-anchor="middle" fill="var(--up)">闭</text>
-  <rect class="dBox" x="110" y="734" width="560" height="22" rx="3"/><text x="390" y="749" text-anchor="middle" class="small">⑭ 闭投影(键在值全空,scores 从不出现)+ audit 逐帧 fsync(失败锁 Unit)+ cash_cost 恒 UNKNOWN</text>
+  <rect class="dBox" x="50" y="830" width="770" height="42" rx="3"/>
+  <text x="60" y="850" class="small">与图一对照:上游 27 步里被保留的只有"融合/预算两段 vendor 原码"和"同步单发语义";其余 18+ 处替换/新增/改写/关闭。</text>
+  <text x="60" y="866" class="small">PG 往返计数:单组召回约 12 次(标记 #1-#12);reflect 每轮工具召回整段重复。断点:无 Grant→步 5 即 403。</text>
 </svg>
-<figcaption>图 2 · 产品 14 个节点的差异徽章与影响。汇总:替换 10 · 新增 4 · 保留 2 · 改写 1 · 关闭 1。</figcaption>
+<figcaption>图 2 · 产品完整流程 24 步,每步徽章+影响。徽章汇总:替换 10 · 新增 5(步 3/6/9-13 中计)· 留/同 3 · 改 1 · 闭 1。</figcaption>
 </figure>
 
-<div class="callout"><p>一句话:上游是一台开架自助机,产品是一条带三道安检的流水线——<b>安检每加一道,都对应一条可指认的代码差异和一项可感知的代价</b>。</p></div>
-
-<h2><span class="no">2</span>差异全清单:除了两臂还有什么</h2>
-<hr class="rule">
-<p class="muted">经核查的 31 条用户可见差异,按六组归置。<b class="g-swap">对 API 使用者冲击前五</b>:①检索面收窄 ②端点参数闭包 ③时限错误语义 ④认证授权语义 ⑤响应信息量。</p>
-
-<h3>进门方式变了</h3>
-<div class="tbl"><table>
-<tr><th>#</th><th>差异</th><th>大白话影响</th></tr>
-<tr><td>D1</td><td>API key 直连 → 登录会话(bearer/cookie+CSRF)+G→H 信封</td><td>长期 key 直连没了;先换会话,浏览器管 CSRF</td></tr>
-<tr><td>D19</td><td>授权=四元组 Grant;无 Grant→403 与"不存在"<b>不可区分</b></td><td>排错分不清"拼错 bank"还是"没授权"(上游可分辨 404)</td></tr>
-<tr><td>D21</td><td>别名仅展示;拿别名寻址→404(无此路由)</td><td>别名只能当备注</td></tr>
-</table></div>
-
-<h3>门变窄了</h3>
-<div class="tbl"><table>
-<tr><th>#</th><th>差异</th><th>大白话影响</th></tr>
-<tr><td>D2</td><td>~99 路由→2 条查询路由;bank 管理无任何路由</td><td>建库、改配置、翻记忆列表——<b>根本没有入口</b></td></tr>
-<tr><td>D3</td><td>请求参数闭集:恰 6 键,未知键 404(上游忽略并报告)</td><td>SDK 按白名单裁参数</td></tr>
-<tr><td>D4</td><td>产品发明了上游没有的 <code>reranking</code> 请求键并强制 <code>cross_encoder</code>(上游是 bank 级开关,请求无此参数)</td><td><b>照抄上游文档会 404</b></td></tr>
-<tr><td>D13</td><td>9 键 settings 由 activation 控制,请求不可传</td><td>调召回条数/预算=改部署,不是改请求</td></tr>
-</table></div>
-
-<h3>能查的范围变小了</h3>
-<div class="tbl"><table>
-<tr><th>#</th><th>差异</th><th>大白话影响</th></tr>
-<tr><td>D5</td><td>types:上游默认三型(含 observation);产品强制 {world,experience}</td><td>上游自动归纳的综合知识,产品查不到</td></tr>
-<tr><td>D12</td><td>上游 bank 级检索开关+每请求 min_scores/tags/时间参数;产品全无</td><td>按租户关某条臂、按请求过滤标签——全部消失</td></tr>
-<tr><td>D14</td><td>keyword:上游 OR+可配语言(可换 pgroonga 等);产品 AND+english 钉死</td><td>多词查询"全词都要中",查不到的明显变多</td></tr>
-<tr><td>D15</td><td>semantic:上游 0.3 地板;产品无地板</td><td>低相关结果更多,精度换覆盖,靠重排兜</td></tr>
-<tr><td>D16</td><td>graph/temporal 两臂:产品无</td><td>实体扩散与时间捞取结构性缺失(§3)</td></tr>
-</table></div>
-
-<h3>回应变少了</h3>
-<div class="tbl"><table>
-<tr><th>#</th><th>差异</th><th>大白话影响</th></tr>
-<tr><td>D7</td><td>响应 6 键中 5 键恒 null;fact 白名单剥离;scores <b>从不出现</b>(死分支)</td><td>靠 trace/实体/chunk/分数的下游功能全部失效</td></tr>
-<tr><td>D8</td><td>recall 的 200 两边都无 usage;产品差异在<b>错误负载</b>(nullable+cash_cost 恒 UNKNOWN)</td><td>失败响应给的是"部分调用、金额未知"的账</td></tr>
-<tr><td>—</td><td>响应帽 ≤1MiB+结果恒 ≤200 条,超 413</td><td>大结果要分页式多查</td></tr>
-</table></div>
-
-<h3>规矩变严了</h3>
-<div class="tbl"><table>
-<tr><th>#</th><th>差异</th><th>大白话影响</th></tr>
-<tr><td>D6</td><td>超长:上游 500 token(可配)→400;产品 8192 <b>字节</b>→<b>413</b></td><td>中文按字节更易触顶;报"太大"不报"参数错"</td></tr>
-<tr><td>D9</td><td>错误闭集+retryable 恒 false+无 499;Retry-After 仅 429/503 OVERLOADED 且 ≤60s(OVERLOADED 恒 1s)</td><td>重试逻辑按"宁可 503 不慢慢等"重写</td></tr>
-<tr><td>D10</td><td>上游排队 30s+执行无总账;产品全程 10s 逻辑账+信封 15s</td><td>慢查询直接 503</td></tr>
-<tr><td>D17</td><td>审计:上游异步可默认关;产品同步 fsync <b>硬前置不可关</b></td><td>审计盘一抖:上游少条日志,产品直接拒绝回答</td></tr>
-<tr><td>—</td><td>Host 头必须精确等于公网 origin;Content-Type 只收 application/json</td><td>反代/直连 IP 被 403;curl 默认表单踩 400——部署新坑</td></tr>
-</table></div>
-
-<h3>多出来的(产品独有)</h3>
-<div class="tbl"><table>
-<tr><th>#</th><th>差异</th><th>大白话影响</th></tr>
-<tr><td>D18</td><td>证据链:witness+两次 QP07;失败<b>抑制整个答案</b></td><td>撤权后上游最多少召回,产品可能把算好的答案吞成 503</td></tr>
-<tr><td>—</td><td>关联 ID 响应头(X-Request-ID 等)</td><td>出问题能拿 id 对账(上游无)</td></tr>
-<tr><td>—</td><td>真 429 四层限流</td><td>上游说"挤",产品说"你被限流了,X 秒后再来"</td></tr>
-<tr><td>—</td><td>断开:transport 后断开→503 UNKNOWN(上游 499+取消)</td><td>用户关页面,产品照样把账算成"结果未知"</td></tr>
-</table></div>
-
-<h2><span class="no">3</span>专章:四臂为什么变两臂</h2>
+<h2><span class="no">3</span>图三 · 大差异对比 + 三张拆分小图</h2>
 <hr class="rule">
 
 <figure>
-<svg viewBox="0 0 780 470" role="img" aria-label="上游四臂与产品两臂机制对照">
-  <defs><marker id="ac" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
-  <text x="200" y="24" text-anchor="middle" font-size="14" font-weight="700" fill="var(--up)">上游 · 四臂</text>
-  <rect class="nBox" x="130" y="38" width="140" height="30" rx="3"/><text x="200" y="58" text-anchor="middle" font-size="12">query</text>
-  <line class="arr" x1="105" y1="68" x2="105" y2="92" marker-end="url(#ac)"/><line class="arr" x1="295" y1="68" x2="295" y2="92" marker-end="url(#ac)"/>
-  <line class="arr" x1="200" y1="68" x2="200" y2="216" stroke-dasharray="4 3"/>
-  <rect class="uBox" x="40" y="96" width="130" height="44" rx="3"/><text x="105" y="114" text-anchor="middle" font-size="11.5">semantic</text><text x="105" y="131" text-anchor="middle" class="small">地板 0.3</text>
-  <rect class="uBox" x="230" y="96" width="130" height="44" rx="3"/><text x="295" y="114" text-anchor="middle" font-size="11.5">BM25 / keyword</text><text x="295" y="131" text-anchor="middle" class="small">OR 拼接 · 语言可配</text>
-  <line class="arr" x1="105" y1="140" x2="105" y2="160" marker-end="url(#ac)"/>
-  <rect class="uBox" x="40" y="164" width="130" height="40" rx="3"/><text x="105" y="181" text-anchor="middle" font-size="11.5">种子:高分前 20</text><text x="105" y="196" text-anchor="middle" class="small">sim ≥ 0.3</text>
-  <line class="arr" x1="105" y1="204" x2="105" y2="224" marker-end="url(#ac)"/>
-  <rect class="uBox" x="40" y="228" width="320" height="58" rx="3"/><text x="200" y="249" text-anchor="middle" font-size="12">graph 扩展(单跳三路)</text><text x="200" y="270" text-anchor="middle" class="small">实体路(unit_entities) | 语义kNN(memory_links) | 因果(caused_by…)</text>
-  <rect class="dBox" x="230" y="216" width="130" height="36" rx="3"/><text x="295" y="239" text-anchor="middle" font-size="11">temporal:有窗才跑</text>
-  <line class="arr" x1="105" y1="286" x2="105" y2="316" marker-end="url(#ac)"/><line class="arr" x1="295" y1="140" x2="295" y2="316"/><line class="arr" x1="295" y1="252" x2="295" y2="316" stroke-dasharray="4 3"/>
-  <line class="arr" x1="105" y1="316" x2="360" y2="316"/><line class="arr" x1="200" y1="316" x2="200" y2="332" marker-end="url(#ac)"/>
-  <rect class="uBox" x="110" y="336" width="180" height="36" rx="3"/><text x="200" y="359" text-anchor="middle" font-size="12">RRF k=60(≤4 路)</text>
-  <text x="200" y="398" text-anchor="middle" class="small">B(与命中共享"青桥项目"实体)经实体路进候选</text>
-  <text x="200" y="416" text-anchor="middle" class="small">前提:retain 已抽出实体并写入 unit_entities</text>
+<svg viewBox="0 0 840 940" role="img" aria-label="14 行逐环节对齐的大差异对比:左列上游右列产品,中列差异徽章">
+  <defs><marker id="m3" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
+  <text x="185" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="var(--up)">开源上游</text>
+  <text x="420" y="22" text-anchor="middle" font-size="13" font-weight="700">差异</text>
+  <text x="655" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="var(--prod)">agentstratum</text>
 
-  <text x="590" y="24" text-anchor="middle" font-size="14" font-weight="700" fill="var(--prod)">产品 · 两臂</text>
-  <rect class="nBox" x="520" y="38" width="140" height="30" rx="3"/><text x="590" y="58" text-anchor="middle" font-size="12">query</text>
-  <line class="arr" x1="530" y1="68" x2="530" y2="92" marker-end="url(#ac)"/><line class="arr" x1="650" y1="68" x2="650" y2="92" marker-end="url(#ac)"/>
-  <rect class="pBox" x="450" y="96" width="160" height="44" rx="3"/><text x="530" y="114" text-anchor="middle" font-size="11.5">semantic</text><text x="530" y="131" text-anchor="middle" class="small">无地板(min=-1)</text>
-  <rect class="pBox" x="630" y="96" width="120" height="44" rx="3"/><text x="690" y="114" text-anchor="middle" font-size="11.5">keyword</text><text x="690" y="131" text-anchor="middle" class="small">AND · english 钉死</text>
-  <line class="arr" x1="530" y1="140" x2="530" y2="200" marker-end="url(#ac)"/><line class="arr" x1="690" y1="140" x2="690" y2="200" marker-end="url(#ac)"/>
-  <line class="arr" x1="530" y1="200" x2="690" y2="200"/><line class="arr" x1="590" y1="200" x2="590" y2="216" marker-end="url(#ac)"/>
-  <rect class="pBox" x="500" y="220" width="180" height="36" rx="3"/><text x="590" y="243" text-anchor="middle" font-size="12">RRF(2 路)</text>
-  <rect class="dBox" x="450" y="280" width="300" height="56" rx="3"/><text x="600" y="301" text-anchor="middle" font-size="11.5">无 graph 通道 · 无 temporal 通道</text><text x="600" y="322" text-anchor="middle" class="small">QP01 例程不读 entities/memory_links · 零日期谓词</text>
-  <text x="600" y="368" text-anchor="middle" class="small">B 靠无地板 top-k 兜底进候选(小库);</text>
-  <text x="600" y="386" text-anchor="middle" class="small">大库 top-k 被更相似者填满时漏召</text>
+  <rect class="uBox" x="20" y="34" width="330" height="46" rx="3"/><text x="30" y="52" font-size="11">1 入口路由:99 条;别名路由层重写</text><text x="30" y="70" class="small">管理/文档/MM/KB/webhooks 端点全在</text>
+  <rect class="bSwap" x="378" y="49" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="62" text-anchor="middle" fill="var(--prod)">替(收窄)</text>
+  <rect class="pBox" x="490" y="34" width="330" height="46" rx="3"/><text x="500" y="52" font-size="11">2 条查询路由闭集;无别名(寻址→404)</text><text x="500" y="70" class="small">bank 管理无任何路由;raw/文档无读入口</text>
 
-  <rect class="nBox" x="40" y="418" width="700" height="40" rx="3"/>
-  <text x="56" y="435" class="small">故事数据:A"青桥项目QB-9于10月8日完成围挡施工" · B"青桥项目的监理单位是华北监理公司"(与A共享实体)</text>
-  <text x="56" y="451" class="small">C"青桥项目10月1日进场" · D"海上项目QZ-1完成沉桩"(无关)——四个查询案例都用这四条事实</text>
+  <rect class="uBox" x="20" y="88" width="330" height="46" rx="3"/><text x="30" y="106" font-size="11">2 认证:Authorization API key,1 步</text><text x="30" y="124" class="small">认完即走,无状态</text>
+  <rect class="bSwap" x="378" y="103" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="116" text-anchor="middle" fill="var(--prod)">替+新</text>
+  <rect class="pBox" x="490" y="88" width="330" height="46" rx="3"/><text x="500" y="106" font-size="11">会话 RPC×2(每请求)+HMAC 信封+验封</text><text x="500" y="124" class="small">jti 一次性防重放;帽 8/超时 1s</text>
+
+  <rect class="uBox" x="20" y="142" width="330" height="46" rx="3"/><text x="30" y="160" font-size="11">3 租户/授权:schema ContextVar</text><text x="30" y="178" class="small">引擎内 validate_recall(1 处调用)</text>
+  <rect class="bSwap" x="378" y="157" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="170" text-anchor="middle" fill="var(--prod)">替+新</text>
+  <rect class="pBox" x="490" y="142" width="330" height="46" rx="3"/><text x="500" y="160" font-size="11">四元组 Grant+G/H/SQL 三层重查</text><text x="500" y="178" class="small">快照钉死:漂移=每请求 409 直到重启</text>
+
+  <rect class="uBox" x="20" y="196" width="330" height="46" rx="3"/><text x="30" y="214" font-size="11">4 准入:lane 16/核,排队 30s</text><text x="30" y="232" class="small">503+Retry-After / 断连 499</text>
+  <rect class="bSwap" x="378" y="211" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="224" text-anchor="middle" fill="var(--prod)">替</text>
+  <rect class="pBox" x="490" y="196" width="330" height="46" rx="3"/><text x="500" y="214" font-size="11">governor 四层桶;并入 10s 总账</text><text x="500" y="232" class="small">无 499;Retry-After 仅 429/503OV≤60s</text>
+
+  <rect class="uBox" x="20" y="250" width="330" height="46" rx="3"/><text x="30" y="268" font-size="11">5 请求解析:pydantic 13 参数开放</text><text x="30" y="286" class="small">未知参数忽略并在响应头报告</text>
+  <rect class="bSwap" x="378" y="265" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="278" text-anchor="middle" fill="var(--prod)">替</text>
+  <rect class="pBox" x="490" y="250" width="330" height="46" rx="3"/><text x="500" y="268" font-size="11">6 键白名单;未知键 404</text><text x="500" y="286" class="small">发明 reranking 键且强制 cross_encoder</text>
+
+  <rect class="uBox" x="20" y="304" width="330" height="46" rx="3"/><text x="30" y="322" font-size="11">6 超长:500 token(可配可关)→400</text><text x="30" y="340" class="small">引擎入口另有截断路径</text>
+  <rect class="bSwap" x="378" y="319" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="332" text-anchor="middle" fill="var(--prod)">替</text>
+  <rect class="pBox" x="490" y="304" width="330" height="46" rx="3"/><text x="500" y="322" font-size="11">8192 字节→413;体 65536B→413</text><text x="500" y="340" class="small">无截断;中文按字节更易触顶</text>
+
+  <rect class="uBox" x="20" y="358" width="330" height="46" rx="3"/><text x="30" y="376" font-size="11">7 检索臂:四臂并行</text><text x="30" y="394" class="small">semantic(0.3 地板)|BM25(OR)|graph|temporal</text>
+  <rect class="bSwap" x="378" y="373" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="386" text-anchor="middle" fill="var(--prod)">替(收窄)</text>
+  <rect class="pBox" x="490" y="358" width="330" height="46" rx="3"/><text x="500" y="376" font-size="11">两臂:semantic(无地板)+keyword(AND)</text><text x="500" y="394" class="small">graph/temporal 无;数据面也不通(图4)</text>
+
+  <rect class="uBox" x="20" y="412" width="330" height="46" rx="3"/><text x="30" y="430" font-size="11">8 候选水合:取正文</text><text x="30" y="448" class="small">无资格/见证语义</text>
+  <rect class="bNew" x="378" y="427" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="440" text-anchor="middle" class="bNewT">新</text>
+  <rect class="pBox" x="490" y="412" width="330" height="46" rx="3"/><text x="500" y="430" font-size="11">QP03 带见证全有全无+证据组</text><text x="500" y="448" class="small">帽 8 组/200 条;约 12 次 PG 往返/召回</text>
+
+  <rect class="uBox" x="20" y="466" width="330" height="46" rx="3"/><text x="30" y="484" font-size="11">9 融合:RRF k=60 + cap/trim</text><text x="30" y="502" class="small">cap 默认关</text>
+  <rect class="bKeep" x="378" y="481" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="494" text-anchor="middle" fill="var(--muted)">留(同)</text>
+  <rect class="pBox" x="490" y="466" width="330" height="46" rx="3"/><text x="500" y="484" font-size="11">同库同函数,经 seam hash 钉死</text><text x="500" y="502" class="small">git 证实零改动——两边完全同行为</text>
+
+  <rect class="uBox" x="20" y="520" width="330" height="46" rx="3"/><text x="30" y="538" font-size="11">10 重排:cross_encoder 可关(降 RRF)</text><text x="30" y="556" class="small">超时降级出结果;provider 可换</text>
+  <rect class="bRew" x="378" y="535" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="548" text-anchor="middle" fill="var(--up)">改</text>
+  <rect class="pBox" x="490" y="520" width="330" height="46" rx="3"/><text x="500" y="538" font-size="11">强制 CE,必须经 L(仅本地 TEI)</text><text x="500" y="556" class="small">源改写加血缘;超时报错不降级</text>
+
+  <rect class="uBox" x="20" y="574" width="330" height="46" rx="3"/><text x="30" y="592" font-size="11">11 预算:select_facts_within_budget</text><text x="30" y="610" class="small">max_tokens 只计 text</text>
+  <rect class="bKeep" x="378" y="589" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="602" text-anchor="middle" fill="var(--muted)">留(同)</text>
+  <rect class="pBox" x="490" y="574" width="330" height="46" rx="3"/><text x="500" y="592" font-size="11">同函数经 seam,git 零改动</text><text x="500" y="610" class="small">行为一致</text>
+
+  <rect class="uBox" x="20" y="628" width="330" height="46" rx="3"/><text x="30" y="646" font-size="11">12 输出复核:无</text><text x="30" y="664" class="small">查到什么返回什么</text>
+  <rect class="bNew" x="378" y="643" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="656" text-anchor="middle" class="bNewT">新</text>
+  <rect class="pBox" x="490" y="628" width="330" height="46" rx="3"/><text x="500" y="646" font-size="11">final_check(QP07+输出授权)+G 末帧</text><text x="500" y="664" class="small">迟到撤权→抑制整个答案→503 UNKNOWN</text>
+
+  <rect class="uBox" x="20" y="682" width="330" height="46" rx="3"/><text x="30" y="700" font-size="11">13 事后回取:entities 默认开</text><text x="30" y="718" class="small">chunks/source_facts 默认关可开</text>
+  <rect class="bRew" x="378" y="697" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="710" text-anchor="middle" fill="var(--up)">闭</text>
+  <rect class="xBox" x="490" y="682" width="330" height="46" rx="3"/><text x="500" y="700" font-size="11">恒 null;scores 从不出现(死分支)</text><text x="500" y="718" class="small">且全产品无替代读入口</text>
+
+  <rect class="uBox" x="20" y="736" width="330" height="46" rx="3"/><text x="30" y="754" font-size="11">14 审计:异步落表,默认关可关</text><text x="30" y="772" class="small">llm_requests 记 LLM 调用;计量回调</text>
+  <rect class="bSwap" x="378" y="751" width="84" height="18" rx="3"/><text class="badgeT" x="420" y="764" text-anchor="middle" fill="var(--prod)">替</text>
+  <rect class="pBox" x="490" y="736" width="330" height="46" rx="3"/><text x="500" y="754" font-size="11">本地同步 fsync 硬前置,不可关</text><text x="500" y="772" class="small">审计盘故障=锁 Unit 拒服务</text>
+
+  <rect class="nBox" x="20" y="798" width="800" height="120" rx="3"/>
+  <text x="32" y="822" font-size="12" font-weight="700">读法:14 行里只有第 9/11 行(融合、预算)两边完全相同(vendor 原码);其余 12 行都动了——</text>
+  <text x="32" y="844" font-size="12">替换 10 处:路由/认证/租户/准入/解析/超长/两臂/投影/审计/编码 · 新增 3 处:转发链/证据资格/输出复核</text>
+  <text x="32" y="866" font-size="12">改写 1 处:重排(加血缘+超时报错)· 关闭 1 处:事后回取 · 差异的深层原因按维度拆成下面三张小图。</text>
+  <text x="32" y="898" class="small">每行的影响细目见 §5 逐阶段大表;代码锚点见 §7;贯穿案例见 §8。</text>
 </svg>
-<figcaption>图 3 · 四臂 vs 两臂机制对照:上游 graph 臂是从 semantic 高分出发的一轮扩展;产品连这个通道也没有。</figcaption>
+<figcaption>图 3 · 大差异对比:14 行逐环节对齐,只有融合与预算两行两边相同。</figcaption>
 </figure>
 
-<h3>3.1 为什么变两臂:四个原因</h3>
-<ol class="story">
-  <li><b>最硬:图臂的"米"没种——写侧不产数。</b>SQL 写面其实已就绪(catalog 7 张表 worker_insert=True,ENTITY/EDGE 可 release);真正缺的是<b>计算件</b>:产品 W 只做抽取+嵌入,无实体解析器;实体解析被三处合同关闭(<code>native_retain.py:269-270</code>、<code>native_retain_http.py:255-256</code>、<code>native_processor.py:170-192</code>);上游语义 kNN 边有 retain 期+graph_maintenance 维护期两个产点,产品 W 连维护任务循环都不存在;TEST-PLAN 里<b>实体用例数为零</b>。</li>
-  <li><b>时间臂缺"窗口"零件</b>:四列数据在 QP01 现成可用;缺窗口来源(上游可传可抽,产品拒收且无抽取件)。</li>
-  <li><b>治理成本</b>:每动一个 SQL 例程=baseline 重写+catalog seal+DTO digest+<b>新 pair 注册激活</b>;上游是 bank 级布尔开关。</li>
-  <li><b>设计意图</b>:base 链先行(中间检查点),图/时间排到 D8/T11。</li>
-</ol>
-<p><b>定性</b>:对当前合同是明示边界,不是 bug;对 S1 全量是未完成中间态(MP-03 要求图/时间,未后置)。两处有意识简化(AND、无地板)要认账;english 是继承上游默认+额外锁死可配置面。<b>计划结构观察</b>:图臂的写侧前置在当前计划里没有显式承载包。</p>
+<h3>3.1 小图 A|数据源不一致:查的根本不是同一批数据</h3>
+<figure>
+<svg viewBox="0 0 840 420" role="img" aria-label="数据源差异:上游读全类型事实加实体表加图边,产品只读 world/experience 基础事实,实体表空置图边不产">
+  <text x="215" y="24" text-anchor="middle" font-size="13" font-weight="700" fill="var(--up)">开源上游检索可读的数据</text>
+  <text x="625" y="24" text-anchor="middle" font-size="13" font-weight="700" fill="var(--prod)">产品检索可读的数据</text>
+  <rect class="uBox" x="20" y="38" width="390" height="360" rx="4"/>
+  <rect class="pBox" x="430" y="38" width="390" height="360" rx="4"/>
+  <text x="35" y="64" font-size="11.5">memory_units(全部 fact_type)</text><text x="445" y="64" font-size="11.5">native_base_facts 视图</text>
+  <text x="35" y="86" font-size="11">world ✓ · experience ✓ · observation ✓</text><text x="445" y="86" font-size="11">world ✓ · experience ✓ · observation ✗(闸)</text>
+  <text x="35" y="118" font-size="11.5">entities / unit_entities(图臂实体路)</text><text x="445" y="118" font-size="11.5">entities / unit_entities</text>
+  <text x="35" y="140" font-size="11">retain 抽实体并写入 ✓</text><text x="445" y="140" font-size="11">表建了但是空表 ✗(写面就绪,计算件缺)</text>
+  <text x="35" y="172" font-size="11.5">memory_links(语义kNN + 因果边)</text><text x="445" y="172" font-size="11.5">memory_links</text>
+  <text x="35" y="194" font-size="11">retain 期+维护期两个产点 ✓</text><text x="445" y="194" font-size="11">仅 entity_id=None 的 caused_by 边 ✗</text>
+  <text x="35" y="226" font-size="11.5">search_vector 全文索引</text><text x="445" y="226" font-size="11.5">search_vector 生成列</text>
+  <text x="35" y="248" font-size="11">bm25_language 可配(还能换后端)✓</text><text x="445" y="248" font-size="11">pg_catalog.english 三重钉死 ✗</text>
+  <text x="35" y="280" font-size="11.5">embedding 向量(pgvector)</text><text x="445" y="280" font-size="11.5">embedding 向量(pgvector)</text>
+  <text x="35" y="302" font-size="11">相似度地板 0.3;可换 provider ✓</text><text x="445" y="302" font-size="11">无地板;多 provider 栈整体不可达 ✗</text>
+  <text x="35" y="334" font-size="11.5">原始正文/documents/chunks</text><text x="445" y="334" font-size="11.5">raw_refs 引用 + OBS 原件</text>
+  <text x="35" y="356" font-size="11">端点直读 ✓</text><text x="445" y="356" font-size="11">无任何读路由 ✗(视图已建,入口缺)</text>
+  <text x="215" y="412" text-anchor="middle" class="small">✗ = 产品今天查不到/不可配;多数不是"查得差",是数据面就没通(§10 C2/C4/C5)</text>
+</svg>
+<figcaption>图 4 · 数据源差异:observation、实体关联、图边、语言配置、provider 选择——五处数据面差异,前四处是"没有",最后一处是"锁死"。</figcaption>
+</figure>
 
-<h3>3.2 四个案例(两臂的后果)</h3>
+<h3>3.2 小图 B|流程不一致:认证/授权/准入/失败的控制流</h3>
+<figure>
+<svg viewBox="0 0 840 470" role="img" aria-label="控制流差异:认证一层变多层跨进程,授权一处变三层,准入lane变governor,失败从499取消变UNKNOWN抑制">
+  <text x="215" y="24" text-anchor="middle" font-size="13" font-weight="700" fill="var(--up)">开源(1 层,进程内)</text>
+  <text x="625" y="24" text-anchor="middle" font-size="13" font-weight="700" fill="var(--prod)">产品(3 层,跨进程)</text>
+  <text x="20" y="56" font-size="12" font-weight="700">认证</text>
+  <rect class="uBox" x="20" y="64" width="390" height="30" rx="3"/><text x="30" y="84" font-size="11">API key(1 步,认完即走,无状态)</text>
+  <rect class="pBox" x="430" y="64" width="390" height="30" rx="3"/><text x="440" y="84" font-size="11">会话 RPC×2 → 信封 → 验封(jti)→ 再授权</text>
+  <text x="20" y="126" font-size="12" font-weight="700">授权</text>
+  <rect class="uBox" x="20" y="134" width="390" height="30" rx="3"/><text x="30" y="154" font-size="11">引擎内 validate_recall(1 处调用点)</text>
+  <rect class="pBox" x="430" y="134" width="390" height="30" rx="3"/><text x="440" y="154" font-size="11">G 四元组 → H 重查 → SQL 内联 guard(三层)</text>
+  <text x="20" y="196" font-size="12" font-weight="700">准入</text>
+  <rect class="uBox" x="20" y="204" width="390" height="30" rx="3"/><text x="30" y="224" font-size="11">lane 16/核·排队≤30s → 503+Retry-After/499</text>
+  <rect class="pBox" x="430" y="204" width="390" height="30" rx="3"/><text x="440" y="224" font-size="11">governor 四层桶 · 全程 10s 总账 · 无 499</text>
+  <text x="20" y="266" font-size="12" font-weight="700">取消</text>
+  <rect class="uBox" x="20" y="274" width="390" height="30" rx="3"/><text x="30" y="294" font-size="11">断连→499+阶段边界取消计算(省算力)</text>
+  <rect class="pBox" x="430" y="274" width="390" height="30" rx="3"/><text x="440" y="294" font-size="11">transport 后不取消;断开→503 UNKNOWN</text>
+  <text x="20" y="336" font-size="12" font-weight="700">失败</text>
+  <rect class="uBox" x="20" y="344" width="390" height="30" rx="3"/><text x="30" y="364" font-size="11">查到什么给什么(撤权最多少召回)</text>
+  <rect class="pBox" x="430" y="344" width="390" height="30" rx="3"/><text x="440" y="364" font-size="11">撤权/漂移→抑制整个答案(503 UNKNOWN)</text>
+  <rect class="nBox" x="20" y="392" width="800" height="60" rx="3"/>
+  <text x="32" y="414" class="small">为什么这样改:三层重查+一次性信封=防伪造网关与重放;10s 总账+UNKNOWN=不谎报成功、已发生效果不清零;</text>
+  <text x="32" y="434" class="small">代价:每请求 2 次会话 RPC、约 12 次 PG 往返、答案可能"白算"——审计性与延迟/成本的直接交换。</text>
+</svg>
+<figcaption>图 5 · 流程差异:每一行都是"上游一步"对"产品多层",换来的每一层都能指认到代码(§7)。</figcaption>
+</figure>
+
+<h3>3.3 小图 C|接口/能力不一致:合同面</h3>
+<figure>
+<svg viewBox="0 0 840 500" role="img" aria-label="接口能力差异:参数闭集、发明reranking键、settings锁死、响应恒null、限额矩阵、错误语义、无MCP">
+  <rect class="nBox" x="20" y="14" width="800" height="472" rx="4"/>
+  <text x="35" y="42" font-size="12" font-weight="700">参数</text><text x="35" y="64" font-size="11">上游 RecallRequest 13 参数开放(未知忽略+X-Ignored-Params 报告)</text>
+  <text x="35" y="84" font-size="11" fill="var(--prod)">产品恰 6 键,未知键 404;发明 reranking 键强制 cross_encoder——照抄上游文档会 404</text>
+  <text x="35" y="116" font-size="12" font-weight="700">配置</text><text x="35" y="138" font-size="11">上游 bank 级臂开关+每请求 min_scores/tags/时间窗+9 项 recall bank config</text>
+  <text x="35" y="158" font-size="11" fill="var(--prod)">产品全部锁进 activation(settings 9 键),请求不可传——调参=改部署</text>
+  <text x="35" y="190" font-size="12" font-weight="700">响应</text><text x="35" y="212" font-size="11">上游 6 键按需填充(entities 默认开);MemoryFact 全字段+scores+source_fact_ids</text>
+  <text x="35" y="232" font-size="11" fill="var(--prod)">产品 5 键恒 null+每 fact 白名单剥离+scores 从不出现;usage 仅错误帧,cash_cost 恒 UNKNOWN</text>
+  <text x="35" y="264" font-size="12" font-weight="700">限额</text><text x="35" y="286" font-size="11">上游:query 500 token(可配可关);响应无承诺上限</text>
+  <text x="35" y="306" font-size="11" fill="var(--prod)">产品:query 8192B→413 · 体 65536B → 413 · 响应 1MiB → 413 · 结果 ≤200 条 · 证据 ≤8 组</text>
+  <text x="35" y="338" font-size="12" font-weight="700">错误</text><text x="35" y="360" font-size="11">上游:FastAPI {detail};校验失败 422;断连 499;503+Retry-After</text>
+  <text x="35" y="380" font-size="11" fill="var(--prod)">产品:{error:{code,effect,request_id,invocation_id,usage,retryable:false}};无 499;用户面含 401/429</text>
+  <text x="35" y="412" font-size="12" font-weight="700">MCP</text><text x="35" y="434" font-size="11">上游 /mcp 39 工具(recall 可用;0.10.3 起紧凑 JSON)</text>
+  <text x="35" y="454" font-size="11" fill="var(--prod)">产品 Query 无 MCP 面——经 MCP 记忆工具接入的 agent 没有对应入口</text>
+  <text x="35" y="478" class="small">关联 ID 响应头(X-Request-ID/X-A01-Request-Id/Invocation-Id)是产品独有:出问题能拿 id 对账</text>
+</svg>
+<figcaption>图 6 · 接口/能力差异:SDK 从上游迁到产品不是改参数,是重写调用面(§4 冲击前五第 2 位)。</figcaption>
+</figure>
+
+<h2><span class="no">4</span>差异全清单:31 条用户可见差异(六组)</h2>
+<hr class="rule">
+<div class="tbl"><table>
+<tr><th>组</th><th>差异(编号)</th><th>一句话</th></tr>
+<tr><td>进门方式</td><td>D1 认证;D19 无 Grant=403 不可区分;D21 别名 404</td><td>长期 key 没了;排错分不清"拼错"还是"没权";别名只能当备注</td></tr>
+<tr><td>门变窄</td><td>D2 99→2 路由;D3 参数闭集;D4 发明 reranking 键;D13 settings 锁死</td><td>建库/改配置无入口;照抄上游文档会 404;调参=改部署</td></tr>
+<tr><td>能查范围</td><td>D5 observation;D12 配置面;D14 AND;D15 无地板;D16 两臂缺</td><td>综合知识查不到;标签/时间过滤消失;多词要全中;关联/时间结构性缺失</td></tr>
+<tr><td>回应变少</td><td>D7 恒 null+scores 死分支;D8 usage 仅错误帧;1MiB/200 条帽</td><td>下游靠这些字段的 功能失效;大结果要分页</td></tr>
+<tr><td>规矩变严</td><td>D6 413;D9 错误语义;D10 10s;D17 审计硬前置;Host/Content-Type</td><td>慢查询直接 503;审计盘抖=拒服务;反代/IP 直连 403</td></tr>
+<tr><td>多出来</td><td>D18 答案抑制;关联 ID 头;真 429;断开→UNKNOWN</td><td>撤权答案吞成 503;能对账;被限流有明确信号</td></tr>
+</table></div>
+<p><b>冲击前五</b>:①检索面收窄 ②端点参数闭包 ③时限错误语义 ④认证授权语义 ⑤响应信息量。</p>
+
+<h2><span class="no">5</span>专章:四臂为什么变两臂</h2>
+<hr class="rule">
+<p><b>四个原因</b>(按证据强度):①图臂的"米"没种——SQL 写面 7 表就绪但 W 计算件只做抽取+嵌入,实体解析被三处合同关闭(<code>native_retain.py:269-270</code> 等),语义 kNN 边无人产,TEST-PLAN 实体用例为零;②时间臂缺"窗口"零件(数据列现成);③治理成本(加臂=例程+baseline+seal+digest+新 pair);④设计意图(base 链先行,图/时间排 D8/T11)。</p>
+<p><b>定性</b>:对当前合同是明示边界,不是 bug;对 S1 全量是未完成中间态。<b>计划结构观察</b>:图臂写侧前置没有显式承载包。</p>
 <div class="tbl"><table>
 <tr><th>案例</th><th>上游</th><th>产品</th><th>大白话</th></tr>
-<tr><td>"QB-9"</td><td>预分词 qb、9,<b>OR</b> 拼接;文档侧"项目qb"粘成一词元<span class="chip inf">推断</span>,但 "9" 独立→靠 9 命中</td><td><b>AND</b> 要 qb+9 全中→qb 粘死→<b>可能整条漏</b></td><td>编号两边留空格两边都能中<span class="chip inf">推断</span></td></tr>
-<tr><td>"青桥项目的相关方有哪些"</td><td>graph 臂沿共享实体把 B 拉进候选</td><td>无图臂;小库 B 靠无地板进 top-k 排尾;<b>大库 top-k 填满才真漏</b></td><td>漏召是规模效应:库越大越吃亏</td></tr>
-<tr><td>"10月第一周的施工进展"</td><td>中文规则<b>没有"N月第M周"</b>→最可能整月;窗口只管本臂;排序按向量</td><td>候选层<b>零日期谓词</b>;C 靠文本相似,D 可能混入</td><td>两边都不干净;产品连通道都没有</td></tr>
-<tr><td>"围挡施工完成了吗"</td><td>纯中文 keyword 失配(english)<span class="chip inf">推断</span></td><td>同样失配;但上游可换配置/后端,产品锁死</td><td>纯中文两边都全押向量模型</td></tr>
+<tr><td>"QB-9"</td><td>OR 拼接;文档侧"项目qb"粘词<span class="chip inf">推断</span>,靠 "9" 命中</td><td>AND 要全中→qb 粘死→可能整条漏</td><td>编号两边留空格两边都能中<span class="chip inf">推断</span></td></tr>
+<tr><td>"青桥项目的相关方有哪些"</td><td>graph 臂沿共享实体把 B 拉进候选</td><td>小库 B 靠无地板排尾进;<b>大库 top-k 填满才真漏</b></td><td>漏召是规模效应</td></tr>
+<tr><td>"10月第一周的施工进展"</td><td>无"N月第M周"规则→最可能整月;窗口只管本臂</td><td>候选层零日期谓词</td><td>两边都不干净;产品连通道都没有</td></tr>
+<tr><td>"围挡施工完成了吗"</td><td>纯中文 keyword 失配<span class="chip inf">推断</span>;可换配置</td><td>同样失配;锁死</td><td>纯中文全押向量模型</td></tr>
 </table></div>
-<p><b>后果七条</b>:①关联事实大库漏召 ②时间查询排序差+无过滤 ③keyword OR→AND 缩水 ④候选更脏更全 ⑤纯中文失去换配置退路 ⑥<b>正面收益</b>:一次例程调用、验收面最小 ⑦S1 验收过不了,两臂态只是 T6 中间检查点。</p>
+<p><b>后果七条</b>:①关联事实大库漏召 ②时间排序差+无过滤 ③keyword 缩水 ④候选更脏更全 ⑤失去换配置退路 ⑥<b>正面:一次例程调用、验收面最小</b> ⑦过不了 S1 验收,只是 T6 中间检查点。</p>
 
-<h2><span class="no">4</span>逐阶段对照:S1—S20(改了什么+影响)</h2>
+<h2><span class="no">6</span>逐阶段对照:S1—S20(改造+影响)</h2>
 <hr class="rule">
 <div class="tbl"><table>
-<tr><th>#</th><th>阶段</th><th>改造</th><th>影响(大白话)</th></tr>
-<tr><td class="mono">S1</td><td>入口路由 99→2</td><td class="grade g-swap">替</td><td>管理端点全不可达;raw/文档无读入口;只读用户 /a01/banks <b>空列表</b>但知道 id 仍可查</td></tr>
-<tr><td class="mono">S2</td><td>认证</td><td class="grade g-swap">替</td><td>每请求固定 <b>2 次</b>会话 RPC;并发帽 8/超时 1s,打满 503</td></tr>
-<tr><td class="mono">S3</td><td>租户定位</td><td class="grade g-swap">替</td><td>G 快照启动装入不热更;H 真读须等于钉死版本——漂移=每请求 409 直到重启</td></tr>
+<tr><th>#</th><th>阶段</th><th>改造</th><th>影响</th></tr>
+<tr><td class="mono">S1</td><td>路由 99→2</td><td class="grade g-swap">替</td><td>管理端点全不可达;raw/文档无读入口;只读用户目录空列表</td></tr>
+<tr><td class="mono">S2</td><td>认证</td><td class="grade g-swap">替</td><td>每请求 2 次会话 RPC;帽 8/超时 1s,打满 503</td></tr>
+<tr><td class="mono">S3</td><td>租户定位</td><td class="grade g-swap">替</td><td>G 快照不热更;漂移=每请求 409 直到重启</td></tr>
 <tr><td class="mono">S4</td><td>三层重查</td><td class="grade g-new">新</td><td>无 Grant 在 G 层即 403,SQL/模型零执行</td></tr>
-<tr><td class="mono">S5</td><td>准入</td><td class="grade g-swap">替</td><td>10s 总账;Retry-After 仅 429/503 OVERLOADED 且 ≤60s(OVERLOADED 恒 1s;限流&gt;60s 反而没头)</td></tr>
+<tr><td class="mono">S5</td><td>准入</td><td class="grade g-swap">替</td><td>10s 总账;Retry-After 仅 429/503OV ≤60s(恒 1s)</td></tr>
 <tr><td class="mono">S6</td><td>请求解析</td><td class="grade g-swap">替</td><td>未知参数 404;observation 不可查</td></tr>
-<tr><td class="mono">S7</td><td>超长查询</td><td class="grade g-swap">替</td><td>8192 字节→413(上游 500 token 可配→400);中文更易触顶</td></tr>
-<tr><td class="mono">S8</td><td>转发通道</td><td class="grade g-new">新</td><td>多一跳网络+签名设施;G↔H 必须同机房</td></tr>
-<tr><td class="mono">S9</td><td>引擎构造</td><td class="grade g-adapt">适配</td><td><b>无生产装配点——今天整链不可部署</b>(一切影响的前置)</td></tr>
-<tr><td class="mono">S10</td><td>模型授权</td><td class="grade g-swap">替</td><td>换模型=快照+activation+profile 一次完整控制面变更</td></tr>
-<tr><td class="mono">S11</td><td>向量编码</td><td class="grade g-swap">替</td><td>换嵌入模型=新空间,旧向量全部不可达,必须重嵌</td></tr>
-<tr><td class="mono">S12</td><td>两臂</td><td class="grade g-swap">替+收窄</td><td>见 §3 四案例</td></tr>
-<tr><td class="mono">S13</td><td>带见证水合</td><td class="grade g-new">新</td><td>单次召回约 <b>12 次 PG 往返</b>起步,reflect 按轮倍增;换可审计证据链;帽 8 组/200 条</td></tr>
-<tr><td class="mono">S14</td><td>融合</td><td class="grade g-keep">留</td><td>无(直调 vendor 原函数)</td></tr>
-<tr><td class="mono">S15</td><td>重排</td><td class="grade g-rewrite">改</td><td>每次多一轮发送前检查+输入记血缘;<b>超时不再降级 RRF 而是报错</b></td></tr>
+<tr><td class="mono">S7</td><td>超长</td><td class="grade g-swap">替</td><td>8192B→413;中文更易触顶</td></tr>
+<tr><td class="mono">S8</td><td>转发</td><td class="grade g-new">新</td><td>多一跳网络+签名设施;须同机房</td></tr>
+<tr><td class="mono">S9</td><td>引擎构造</td><td class="grade g-adapt">适配</td><td><b>无生产装配点,今天整链不可部署</b></td></tr>
+<tr><td class="mono">S10</td><td>模型授权</td><td class="grade g-swap">替</td><td>换模型=快照+activation+profile 完整变更</td></tr>
+<tr><td class="mono">S11</td><td>向量编码</td><td class="grade g-swap">替</td><td>换嵌入模型=新空间,旧向量不可达须重嵌</td></tr>
+<tr><td class="mono">S12</td><td>两臂</td><td class="grade g-swap">替+收窄</td><td>见 §5 四案例</td></tr>
+<tr><td class="mono">S13</td><td>见证水合</td><td class="grade g-new">新</td><td>单次召回约 12 次 PG 往返起步;帽 8 组/200 条</td></tr>
+<tr><td class="mono">S14</td><td>融合</td><td class="grade g-keep">留</td><td>无</td></tr>
+<tr><td class="mono">S15</td><td>重排</td><td class="grade g-rewrite">改</td><td>多一轮发送前检查+血缘;超时报错不降级</td></tr>
 <tr><td class="mono">S16</td><td>预算</td><td class="grade g-keep">留</td><td>无</td></tr>
-<tr><td class="mono">S17</td><td>输出复核</td><td class="grade g-new">新</td><td>迟到撤权抑制整个答案(已花的调用作废,计次保留)</td></tr>
-<tr><td class="mono">S18</td><td>事后回取</td><td class="grade g-off">闭</td><td>恒 null,<b>且全产品无替代读入口</b></td></tr>
-<tr><td class="mono">S19</td><td>响应投影</td><td class="grade g-swap">替</td><td>键在值全空;scores 从不出现;usage 仅错误帧</td></tr>
-<tr><td class="mono">S20</td><td>审计</td><td class="grade g-swap">替</td><td>审计盘故障=锁 Unit 拒服务;上游可关,产品不可关;cash_cost 恒 UNKNOWN</td></tr>
+<tr><td class="mono">S17</td><td>输出复核</td><td class="grade g-new">新</td><td>迟到撤权抑制整个答案</td></tr>
+<tr><td class="mono">S18</td><td>事后回取</td><td class="grade g-off">闭</td><td>恒 null 且无替代读入口</td></tr>
+<tr><td class="mono">S19</td><td>响应投影</td><td class="grade g-swap">替</td><td>键在值全空;scores 死分支;usage 仅错误帧</td></tr>
+<tr><td class="mono">S20</td><td>审计</td><td class="grade g-swap">替</td><td>审计盘故障=锁 Unit;不可关;cash_cost 恒 UNKNOWN</td></tr>
 </table></div>
-<p class="muted">汇总:替换 10 · 新增 4 · 保留 2 · 适配 1 · 改写 1 · 关闭 1。</p>
 
-<h2><span class="no">5</span>关键刀口核心代码(六组)</h2>
+<h2><span class="no">7</span>关键刀口核心代码(六组)</h2>
 <hr class="rule">
 <pre class="code"># ①认证 产品 control/envelope.py:93,155-162
-"jti": secrets.token_hex(16)      # 一次性请求 ID,防重放
+"jti": secrets.token_hex(16)      # 一次性请求 ID
 issued &lt;= now &lt; deadline          # 死线 ≤15s;cookie 身份再下取到 expires_at
 
 # ②准入 上游 api/admission.py:257-275 vs 产品 gateway/admission.py:188-199
-"recall": LaneConfig(16/核, 30s)   # 上游:排队超时 503+Retry-After / 断连 499
-_global/_tenant/_subject/_action  # 产品:四层桶+状态槽;并入 10s;无 499
+"recall": LaneConfig(16/核, 30s)   # 上游:503+Retry-After / 499
+_global/_tenant/_subject/_action  # 产品:四层桶;并入 10s;无 499
 
-# ③超长 上游 400+引擎截断 vs 产品两级硬拒
+# ③超长 上游 400+截断 vs 产品两级硬拒
 query = text_input(value["query"], 8192, empty=False)   # 产品 qhttp:134,超→413
 require(0 &lt; len(spec["query"].encode()) &lt;= 8192)        # 产品引擎断言 query.py:480
 
 # ④检索 SQL:上游动态四臂 OR vs 产品闭式两臂 AND
 1 - (embedding &lt;=&gt; $1::vector)                                 # 上游 sql/postgresql.py:324
-'qb' | '9'                                                     # 上游 OR 拼接 :463-464
+'qb' | '9'                                                     # 上游 OR :463-464
 qts:=plainto_tsquery('pg_catalog.english'::regconfig, ...)     # 产品 AND :261
 
 # ⑤资格复核 产品 native/query.py:443-461,548-562(上游无)
 receipt = await self.pg.qualify_read(..., refs, witness)  # 发送前+输出前各一轮
 
-# ⑥审计 上游 engine/audit.py:209-213 异步可关 vs 产品 control/audit.py:233-244 同步 fsync
-#   产品失败:当次 QUERY_AUDIT_UNAVAILABLE;后续锁 Unit QUERY_UNIT_NOT_READY(audit.py:90-92)</pre>
+# ⑥审计 上游 engine/audit.py:209-213 异步可关 vs 产品 control/audit.py:233-244 同步 fsync</pre>
 
-<h2><span class="no">6</span>贯穿案例:一次召回的 18 步(含每步 PG 往返计数)</h2>
+<h2><span class="no">8</span>贯穿案例:一次召回 18 步(含 PG 往返计数)</h2>
 <hr class="rule">
-<p>bank=<code>qb-bank</code>,alice(有 read Grant),body <code>{"query":"青桥周报本周进展","types":["world"],"max_tokens":4096}</code>。代码路径走查,非运行声明;括号内为该步的 PG 往返。</p>
+<p>bank=<code>qb-bank</code>,alice(有 read Grant),body <code>{"query":"青桥周报本周进展","types":["world"],"max_tokens":4096}</code>。代码路径走查,非运行声明;括号内为该步 PG 往返。</p>
 <div class="tbl"><table>
 <tr><th>步</th><th>处置</th><th>证据</th></tr>
 <tr><td>1</td><td>路由匹配;10s 总预算起表(双钟)</td><td><code>s1.py:203-219</code>;<code>qhttp:166-169</code></td></tr>
@@ -376,113 +494,86 @@ receipt = await self.pg.qualify_read(..., refs, witness)  # 发送前+输出前�
 <tr><td>3</td><td>四元组授权(无 Grant→403,后续不执行)</td><td><code>snapshots.py:318-326</code>;<code>gq:189-190</code></td></tr>
 <tr><td>4</td><td>governor 4 层桶</td><td><code>admission.py:182-199</code></td></tr>
 <tr><td>5</td><td>读体≤65536B;闭 parse</td><td><code>gq:175-179</code>;<code>qhttp:122-154</code></td></tr>
-<tr><td>6</td><td>重身份(第 2 次会话 RPC)+重授权;cookie 死线收紧</td><td><code>gq:180-183</code>;<code>qhttp:175-185</code></td></tr>
+<tr><td>6</td><td>重身份(第 2 次 RPC)+重授权;cookie 死线收紧</td><td><code>gq:180-183</code>;<code>qhttp:175-185</code></td></tr>
 <tr><td>7</td><td>签信封→禁重试转发→H</td><td><code>gq:126-156,133-139</code></td></tr>
 <tr><td>8</td><td>H 验封(HMAC+jti 防重放+15s 窗)</td><td><code>handler/app.py:123-124</code>;<code>env:129-196</code></td></tr>
 <tr><td>9</td><td>begin:重 parse+deadline=min(4 项)</td><td><code>auth:414-448,419-427</code></td></tr>
-<tr><td>10</td><td>Meta 快照(第 1 次 PG)+ModelBinding 恰一</td><td><code>auth:450-518</code></td></tr>
-<tr><td>11</td><td>PRE_FACTORY preflight(第 2 次 PG)→audit START</td><td><code>facade:271-277</code>;<code>audit.py:256-257</code></td></tr>
+<tr><td>10</td><td>Meta 读(PG#1)+ModelBinding 恰一</td><td><code>auth:450-518</code></td></tr>
+<tr><td>11</td><td>PRE_FACTORY preflight(PG#2)+audit START</td><td><code>facade:271-277</code>;<code>audit.py:256-257</code></td></tr>
 <tr><td>12</td><td>host 白名单→移交 host.recall</td><td><code>host:463-528</code>;<code>memory_engine.py:8569-8571</code></td></tr>
-<tr><td>13</td><td>embed 检查(Meta+preflight,第 3/4 次 PG)→L embed</td><td><code>native_models.py:390-394</code>;<code>models/native.py:65-76</code></td></tr>
-<tr><td>14</td><td>QP01 search+hydrate(第 5/6 次 PG)→组登记</td><td><code>host:634-649</code></td></tr>
-<tr><td>15</td><td>rerank 发送检查(Meta+preflight+QP07,第 7-9 次)→L rerank</td><td><code>native_models.py:396-424</code>;<code>host:652-673</code></td></tr>
+<tr><td>13</td><td>embed 检查(PG#3,4)→L.embed</td><td><code>native_models.py:390-394</code>;<code>models/native.py:65-76</code></td></tr>
+<tr><td>14</td><td>QP01(PG#5)+QP03(PG#6)+组登记</td><td><code>host:634-649</code></td></tr>
+<tr><td>15</td><td>重排检查(PG#7-9)→L.rerank</td><td><code>native_models.py:396-424</code>;<code>host:652-673</code></td></tr>
 <tr><td>16</td><td>打分→预算→缓冲结果</td><td><code>host:669-690</code></td></tr>
-<tr><td>17</td><td>final_check(Meta+preflight+QP07,第 10-12 次);失败→抑制→503 UNKNOWN</td><td><code>host:544-585,577-583</code></td></tr>
-<tr><td>18</td><td>闭投影→G 末帧复核→回传;audit 落 TERMINAL</td><td><code>facade:128-159</code>;<code>gq:241-247</code>;<code>audit.py:146-299</code></td></tr>
+<tr><td>17</td><td>final_check(PG#10-12);失败→抑制→503 UNKNOWN</td><td><code>host:544-585,577-583</code></td></tr>
+<tr><td>18</td><td>闭投影→G 末帧复核→回传;audit TERMINAL</td><td><code>facade:128-159</code>;<code>gq:241-247</code>;<code>audit.py:146-299</code></td></tr>
 </table></div>
-<p>断点:(a) 无 Grant→步 3 即 403;(b) <code>include_chunks:true</code>→步 5 的 404;(c) 缺 rerank 绑定→步 10 的 403,与 (a) 对外不可区分。</p>
+<p>断点:(a) 无 Grant→步 3 即 403;(b) <code>include_chunks:true</code>→步 5 的 404;(c) 缺 rerank 绑定→步 10 的 403,与 (a) 不可区分。</p>
 
-<h2><span class="no">7</span>改造到什么程度:三层结论</h2>
+<h2><span class="no">9</span>改造到什么程度:三层结论</h2>
 <hr class="rule">
 <div class="tbl"><table>
 <tr><th>层</th><th>结论</th></tr>
 <tr><td><b>算法/代码层:基本齐</b></td><td>全链在位;融合/预算 vendor 原码,重排改写加血缘</td></tr>
-<tr><td><b>装配层:缺生产组合根</b></td><td>全仓只有 3 个监听点(旧 G loopback、L×2);<b>G/H/W 生产启动入口一个不存在</b>;D2 的 bank_catalog 两个文件还没建</td></tr>
+<tr><td><b>装配层:缺生产组合根</b></td><td>全仓仅 3 个监听点(旧 G loopback、L×2);<b>G/H/W 生产启动入口一个不存在</b>;D2 的 bank_catalog 两文件未建</td></tr>
 <tr><td><b>验证层:STALE+全 NOT_RUN</b></td><td>指纹待重绑;真实 DataPG/L/端到端未运行</td></tr>
 </table></div>
 
-<h2><span class="no">8</span>能力补齐:需要什么 → 要做什么 → 怎么算完成</h2>
+<h2><span class="no">10</span>能力补齐:需要什么 → 要做什么 → 怎么算完成</h2>
 <hr class="rule">
 
 <h3>C1 · temporal 时间臂(读侧为主,最近)</h3>
-<p><b>需要什么</b>:时间列已在 QP01 数据通路现成(<code>native_sql.py:427</code>、<code>native_query_sql.py:101-103</code>);缺窗口来源。<b>无写侧前置。</b></p>
-<p><b>要做什么</b>:①合同决定窗口来源二选一——调用方必传 <code>temporal_window</code>(移植面≈0),或移植上游抽取件(带 dateparser 依赖+中文规则);②解封参数三处:<code>query_http.py:128</code> 键集、<code>query.py:622-625</code>、<code>native_query.py:226-240</code> DTO;③SQL 例程加窗谓词(照上游 <code>retrieval.py:568-591</code>;注意 created_after/before 上游过滤的是 updated_at,语义要在合同定死);④<b>最小版成立</b>:窗口过滤+向量排序即可——spreading 依赖 memory_links(产品无人写,必然空转),上游自己也有无 spreading 降级先例(<code>retrieval.py:687-691</code>);⑤全家桶(例程+DTO digest+catalog seal+新 pair)+c-query 三份合同文档改口径。</p>
-<p><b>怎么算完成</b>:T11 图/时间入口独立 gold(现有 Q1/Q2 明言不证时态,需新时间 gold)。</p>
+<p><b>需要什么</b>:时间列现成;缺窗口来源。<b>要做什么</b>:①窗口二选一(调用方必传,移植面≈0;或移植上游抽取件);②解封三处(<code>query_http.py:128</code>/<code>query.py:622-625</code>/<code>native_query.py:226-240</code>);③例程加窗谓词(照 <code>retrieval.py:568-591</code>);④最小版=窗口过滤+向量排序(spreading 产品无人写必空转;上游有无 spreading 降级先例 <code>retrieval.py:687-691</code>);⑤全家桶+合同口径。<b>怎么算完成</b>:T11 新时间 gold。</p>
 
-<h3>C2 · graph 图臂(写侧前置+读侧,最远)</h3>
-<p><b>需要什么</b>:写侧先产数——实体解析、entities/unit_entities 行、语义 kNN 边;<b>验收 oracle 也要新造</b>(TEST-PLAN 实体用例数为零)。</p>
-<p><b>要做什么</b>:①解封实体解析四处合同:<code>native_retain.py:269-270</code>、<code>native_retain_http.py:255-256</code>、vendor <code>native_processor.py:170-192</code>(<code>native_sql.py:205-209</code> 只是形状校验,不是关闭点);②W 计算件产出实体行(SQL 写面 7 表就绪、行键计算已覆盖,缺"谁算出这些行"——上游实体链在 <code>link_utils.py:282,406</code>+<code>orchestrator.py:596-769</code>);③语义 kNN 边:上游两个产点(retain 期 <code>orchestrator.py:634,769</code>;维护期 graph_maintenance 任务 <code>memory_engine.py:4084-4100</code>)——产品 W 无维护循环,<b>最小版应在 retain 期内联产边</b>;④补 unit_entities 实体优先索引(加索引=改 compile_plan+新 pair);⑤读侧移植三路 CTE(<code>ops_postgresql.py:941-1037</code>,可先做单实体路)接入逐臂融合;⑥全家桶+合同文档。</p>
-<p><b>怎么算完成</b>:写侧新实体 oracle(现空白,可挂 AT11a 对照)+T11 图入口;不做维护循环须在合同写明"边仅 retain 期产出"。</p>
+<h3>C2 · graph 图臂(写侧前置,最远)</h3>
+<p><b>需要什么</b>:实体解析+实体行+kNN 边+<b>全新验收 oracle(实体用例数为零)</b>。<b>要做什么</b>:①解封四处合同(<code>native_retain.py:269-270</code>/<code>native_retain_http.py:255-256</code>/vendor <code>native_processor.py:170-192</code>);②W 计算件产出实体行(SQL 写面 7 表就绪,缺"谁算出这些行";上游实体链 <code>link_utils.py:282,406</code>+<code>orchestrator.py:596-769</code>);③kNN 边最小版 retain 期内联产(上游另有维护期产点,产品 W 无维护循环);④补 unit_entities 实体优先索引;⑤读侧移植三路 CTE(<code>ops_postgresql.py:941-1037</code>,可先单实体路);⑥全家桶。<b>怎么算完成</b>:实体 oracle+T11;不做维护循环须合同写明"边仅 retain 期产出"。</p>
 
-<h3>C3 · 中文 keyword(三方案,先拍板)</h3>
-<p><b>需要什么</b>:无数据前置;纯 keyword 臂替换/叠加,向量不动。</p>
-<p><b>要做什么</b>:①<b>换 regconfig</b>:改生成列(<code>native_catalog.py:105-110</code>)+例程 regconfig(<code>native_query_sql.py:261</code>)——<b>不需要重嵌</b>(embedding 独立),但 generated 列变更=catalog digest→seal→新 pair,存量数据从 OBS 重投影;②<b>引入 CJK 后端(pgroonga)</b>:上游路径 <code>sql/postgresql.py:381-398</code>(TokenBigram),产品要新写例程分支+换/加索引+pair 声明扩展依赖——改动面最大;③<b>维持 english+声明限制</b>:改合同文档与 TEST-PLAN 口径,接受 AT05c 缺口。</p>
-<p><b>怎么算完成</b>:三方案统一=AT05c/AT11c 中文 gold 通过+口径入合同;方案 1/2 另需新 pair 安装证据。</p>
+<h3>C3 · 中文 keyword(三方案先拍板)</h3>
+<p><b>要做什么</b>:①换 regconfig——不重嵌(embedding 独立),但 generated 列变更=新 pair,存量从 OBS 重投影;②pgroonga 后端——上游路径 <code>sql/postgresql.py:381-398</code>,新写分支+索引+扩展依赖,改动面最大;③维持 english+声明限制。<b>怎么算完成</b>:AT05c/AT11c 中文 gold+口径入合同。</p>
 
-<h3>C4 · observation 读取(读侧+一个隐藏的 release 缺口)</h3>
-<p><b>需要什么</b>:读侧解封+<b>写侧=D6</b>;另有一个语法级缺口。</p>
-<p><b>要做什么</b>:①读侧解封三处:<code>native_query_sql.py:125,228</code>+<code>query.py:622-627</code>+<code>query_http.py:140</code>,再加 G 响应 type 白名单(<code>gateway/query.py:98</code>);prefer_observations 是检索后按 provenance 去重(Python 侧),不进 SQL;②based_on 桶加 observation(<code>query.py:731</code>);③<b>隐藏缺口</b>:可见性视图已预留(<code>native_sql.py:449-453</code>),但派生 observation 要求 FACT map 行 support_kind='BASE_FACT_SET'(<code>native_sql.py:438-448</code>),而 release 例程把 FACT 硬绑 RAW_COMPLETE(<code>native_projection_sql.py:278</code>)——<b>D6 必须改 sealed 的 release 语法出新 pair</b>,是"改合同语法"不是"放开关"。</p>
-<p><b>怎么算完成</b>:产出=T9(关 DERIVED 不算正常通过);读取=T11。</p>
+<h3>C4 · observation 读取(读侧+隐藏缺口)</h3>
+<p><b>要做什么</b>:①读侧解封三处(<code>native_query_sql.py:125,228</code>/<code>query.py:622-627</code>/<code>query_http.py:140</code>)+G type 白名单+based_on 加桶;②<b>隐藏缺口</b>:release 例程把 FACT 硬绑 RAW_COMPLETE(<code>native_projection_sql.py:278</code>),而派生 observation 要 FACT+BASE_FACT_SET(<code>native_sql.py:438-448</code>)——D6 必须<b>改 sealed 的 release 语法出新 pair</b>。<b>怎么算完成</b>:产出 T9+读取 T11。</p>
 
 <h3>C5 · chunk/原文回查</h3>
-<p><b>需要什么</b>:无新数据(视图已建好 <code>native_sql.py:469-479</code>);前置是 D8 入口清单与权限面。现状:<b>全产品无任何 document/raw/chunk 读路由</b>。</p>
-<p><b>要做什么</b>:①读例程(QP04 或新编号;照 QP07 的 guard/stamp/baseline 模式);②HTTP 入口+G 转发(<code>query_http.py:43</code> 键集扩展+<code>handler/app.py:112-116</code> dispatch);③权限:按当前 read Grant,OBS 凭据留在 H 侧不下放。</p>
-<p><b>怎么算完成</b>:D8/T11(AT08b"非搜索直读 doc/chunk/raw"已有用例)。</p>
+<p><b>要做什么</b>:读例程(照 QP07 guard 模式;视图已建 <code>native_sql.py:469-479</code>)+HTTP 入口+G 转发+OBS 凭据留 H 侧。<b>怎么算完成</b>:D8/T11(AT08b 已有用例)。</p>
 
 <h3>C6 · MM 进 Reflect</h3>
-<p><b>需要什么</b>:MM 存储已在产品 catalog(<code>native_catalog.py:333</code> 含 embedding;pages 已加 prepared 列,<code>native_pages_sql.py:274-312</code> 已能写 MM);缺工具位+检索例程+D6 刷新 producer。</p>
-<p><b>要做什么</b>:①解封 reflect 五工具位中的 MM 两位(<code>query.py:725</code> 的 closed()→真实检索;MM 有 embedding,可走 QP01 同型向量臂);②observations 位依赖 C4/D6,expand 位依赖 C2/C4——可只先解 MM 两位;③生成侧=D6(pages DERIVED 合同)。</p>
-<p><b>怎么算完成</b>:T9(AT06c 五步链已是现成 gold)。</p>
+<p><b>要做什么</b>:解封五工具位中的 MM 两位(<code>query.py:725</code>;MM 有 embedding 可走 QP01 同型臂);生成侧=D6。<b>怎么算完成</b>:T9(AT06c 现成 gold)。</p>
 
 <h3>C7 · Pages 检索组合</h3>
-<p><b>需要什么</b>:D5/T7 页合同+D6/T9 派生输出;组合 store 类已存在(<code>native_pages.py:29-40</code>)。</p>
-<p><b>要做什么</b>:<b>唯一硬拒点</b>=<code>native_query_authority.py:186</code> 精确类型检查——按 D7 合同加显式组合分支(不是删检查);kernel 检查天然通过;retain 权威层同型检查(<code>native_retain_authority.py:239,325</code>)若组合资源收 retain 需同改;D2 目录须把组合 profile 列为支持。</p>
-<p><b>怎么算完成</b>:T10(两个 pure 测试不足以关闭)。</p>
+<p><b>要做什么</b>:<b>唯一硬拒点</b>=<code>native_query_authority.py:186</code> 精确类型检查——按 D7 合同加显式组合分支(不是删检查);retain 权威层同型检查视需要同改。<b>怎么算完成</b>:T10。</p>
 
-<h3>C8 · 生产组合根(装配)</h3>
-<p><b>需要什么</b>:D1-D4 各自生产构造物+D9 部署面。代码零件齐,<b>装配点一个都不存在</b>(全仓仅 3 个监听点:旧 G loopback、L×2)。</p>
-<p><b>要做什么</b>:①D1:Session 真实 pool/首装/启动停止入口+生命周期收据;②D2:<code>contracts/bank_catalog.py</code>+<code>gateway/bank_catalog.py</code> 两个<b>尚不存在</b>的文件+s1 显式 route/provider;③D3:H/W 生产组合 config+显式进程入口(新启动器);④D4:真实 base Unit 的 approved QueryActivation/profile 生产构造(现仅测试);⑤总装:把 QueryForwarder+NativeRetainForwarder 传入 <code>create_shared_gateway</code>(<code>s1.py:100-120</code>)并拉起 H/W 的入口;⑥D9:目标部署配置/health/启停脚本。</p>
-<p><b>怎么算完成</b>:T1/T2(D1)、T4b(D2)、T3/T6(D3)、T4a/T5(D4)、T12(D9);中间检查点=T6。</p>
+<h3>C8 · 生产组合根</h3>
+<p><b>要做什么</b>:装配点一个不存在(全仓仅 3 监听点)。D1 Session 启动入口;D2 两个 bank_catalog 新文件;D3 H/W 生产启动器;D4 生产 activation 构造;总装(forwarder 传入 <code>create_shared_gateway</code> 并拉起 H/W);D9 部署配置。<b>怎么算完成</b>:T1/T2/T3/T4a/T4b/T12;中间检查点=T6。</p>
+<div class="callout"><p><b>两个最易被低估的前置</b>:①C2 表面"解封开关",实际新造模型侧抽取+边口径+索引+catalog 变更+oracle;②C4 看似放行,实际动 sealed release 语法出新 pair。</p></div>
 
-<div class="callout"><p><b>两个最易被低估的前置</b>:①C2 图臂——表面是"解封一个开关",实际要新造模型侧实体抽取、边产出口径、索引、catalog 变更和<b>全新 oracle</b>;②C4 observation——可见性视图已预留易让人以为只差放行,实际要动 sealed 的 release 语法出新 pair。</p></div>
-
-<h2><span class="no">9</span>下一步(依 NEXT-STAGE-PLAN 原文)</h2>
+<h2><span class="no">11</span>下一步(依 NEXT-STAGE-PLAN 原文)</h2>
 <hr class="rule">
-<p><b>最短关键路径</b>:D1+D3+D4 并行 → T1/T2/T3/T4a → T6(第一条真实链,不等目录/浏览器)。</p>
-<div class="tbl"><table>
-<tr><th>顺序</th><th>包</th><th>内容</th><th>验证</th></tr>
-<tr><td>1</td><td>D1+D3+D4</td><td>Session 生产组合;Retain 新资源 H/W 提供方;QueryActivation 重绑(<code>ea23b4e4…</code>)+H24/H40/H41+H38/H39</td><td>T1/T2/T3/T4a</td></tr>
-<tr><td>2</td><td>T6</td><td>来源 gold;65536/65537B;末帧;无授权对照;不关闭 J1/J2/J3</td><td>T6</td></tr>
-<tr><td>3</td><td>D2/D4</td><td>目录 provider(绑实际 forwarder);UI18 wire 差额</td><td>T4b/T5</td></tr>
-<tr><td>4</td><td>D5→D6→D7</td><td>人工页→归纳/MM(含 C4 release 语法变更)→Pages 检索组合</td><td>T7/T9/T10</td></tr>
-<tr><td>5</td><td>D8/T11</td><td>图/时间/原文/文件/管理逐入口(图臂需先补 C2 写侧前置)</td><td>T11</td></tr>
-<tr><td>6</td><td>D9→T12→T8</td><td>多实例/部署/接手;T8 最后,当前 NOT_ACCEPTED</td><td>T12/T8</td></tr>
-</table></div>
+<p><b>最短关键路径</b>:D1+D3+D4 并行 → T1/T2/T3/T4a → T6。顺序:1) D1/D3/D4 → 2) T6 → 3) D2/D4 → 4) D5→D6→D7 → 5) D8/T11(图臂先补 C2 写侧)→ 6) D9→T12→T8(当前 NOT_ACCEPTED)。</p>
 
-<h2><span class="no">10</span>交叉验证记录(1+1 落痕 v4)</h2>
+<h2><span class="no">12</span>交叉验证记录(1+1 落痕,五轮累计)</h2>
 <hr class="rule">
 <div class="tbl"><table>
 <tr><th>初稿说法</th><th>复核结果</th><th>处置</th></tr>
-<tr><td>"每请求 1 次会话 RPC"</td><td>证伪:每数据请求 <b>2 次</b>(认证+发送前复核)</td><td>改 S2</td></tr>
-<tr><td>"召回 DB 往返=QP03+QP07×组数"</td><td>低估:单组约 <b>12 次</b>起步</td><td>改 S13/案例</td></tr>
-<tr><td>"上游有 reranking 请求参数"</td><td>证伪:bank 级开关;产品发明请求键并强制值——照抄上游文档会 404</td><td>补 D4</td></tr>
-<tr><td>"产品超长=400"</td><td>修正:是 <b>413</b>(400 只给形状错)</td><td>改 D6/S7</td></tr>
-<tr><td>"G 快照每请求重建"</td><td>修正:启动装入不热更;H 真读但须等于钉死版本</td><td>改 S3</td></tr>
-<tr><td>"重排超时会降级"</td><td>证伪:受控模式超时<b>直接报错</b>(<code>reranking.py:434-439</code>)</td><td>改 S15</td></tr>
-<tr><td>"scores 可透出"</td><td>修正:死分支,从不出现</td><td>改 S19</td></tr>
-<tr><td>"写别名=403"</td><td>修正:无此路由,是 404</td><td>改 D21</td></tr>
-<tr><td>"用户面错误码=6 个闭集"</td><td>补正:还有 401/429</td><td>改 D9</td></tr>
-<tr><td>"recall 200 有 usage 差异"</td><td>修正:200 两边都无;差异在错误负载</td><td>改 D8</td></tr>
-<tr><td>"retain 只写 4 表"</td><td>修正:SQL 写面 7 表就绪;缺<b>计算件</b></td><td>改 §3.1/C2</td></tr>
-<tr><td>"observation 只差读侧放行"</td><td>修正:还有 release 语法缺口——改 sealed 语法出新 pair</td><td>改 C4</td></tr>
-<tr><td>"图臂数据表没建"</td><td>修正:表/写面就绪;缺计算件+实体 oracle(用例为零)</td><td>改 C2</td></tr>
-<tr><td>新发现 3 条</td><td>只读用户 /a01/banks 空列表;G 冷启动 0 令牌易 429;ingest UNKNOWN 写冷却 1-10s</td><td>补 §2/§4</td></tr>
-<tr><td>v2/v3 全部记录</td><td>保留有效</td><td>—</td></tr>
+<tr><td>每请求 1 次会话 RPC</td><td>证伪:每数据请求 2 次</td><td>改 S2</td></tr>
+<tr><td>召回 DB 往返=QP03+QP07×组数</td><td>低估:单组约 12 次起步</td><td>改 S13/图2</td></tr>
+<tr><td>上游有 reranking 请求参数</td><td>证伪:bank 级开关;产品发明并强制——照抄文档 404</td><td>补 D4</td></tr>
+<tr><td>产品超长=400</td><td>修正:413(400 只给形状错)</td><td>改 D6/S7</td></tr>
+<tr><td>G 快照每请求重建</td><td>修正:启动装入不热更;H 真读须等于钉死版本</td><td>改 S3</td></tr>
+<tr><td>重排超时会降级</td><td>证伪:受控模式直接报错</td><td>改 S15</td></tr>
+<tr><td>scores 可透出</td><td>修正:死分支从不出现</td><td>改 S19</td></tr>
+<tr><td>写别名=403</td><td>修正:无路由,是 404</td><td>改 D21</td></tr>
+<tr><td>用户面错误码=6 个</td><td>补正:还有 401/429</td><td>改 D9</td></tr>
+<tr><td>recall 200 有 usage 差异</td><td>修正:200 两边都无;差异在错误负载</td><td>改 D8</td></tr>
+<tr><td>retain 只写 4 表</td><td>修正:SQL 写面 7 表就绪;缺计算件</td><td>改 §5/C2</td></tr>
+<tr><td>observation 只差读侧放行</td><td>修正:release 语法缺口——改 sealed 语法出新 pair</td><td>改 C4</td></tr>
+<tr><td>图臂数据表没建</td><td>修正:表/写面就绪;缺计算件+实体 oracle</td><td>改 C2</td></tr>
+<tr><td>新发现 3 条</td><td>只读用户目录空列表;G 冷启动 0 令牌;ingest UNKNOWN 写冷却</td><td>补 §4/§6</td></tr>
 </table></div>
 
-<h2><span class="no">11</span>一段话总结</h2>
+<h2><span class="no">13</span>一段话总结</h2>
 <hr class="rule">
-<div class="callout"><p>把开源 Hindsight 改造成 agentstratum,不是"换了个皮",而是<b>在 20 个环节里动了 18 个</b>:10 处整建制替换、4 处从无到有、1 处改了上游源码、1 处直接砍掉,只有融合和预算两段原封不动地经 hash 钉死沿用。两臂只是最显眼的那处收窄——同一段话在两边的世界里查出的东西集和顺序根本不同。每一刀都有代价:每请求两次会话 RPC、单次召回约 12 次 PG 往返、10 秒总账、答案可能被制度性吞成 503;每一刀也都有回报:每条证据可审计、越权在 SQL 层就死、出问题有 id 可对账。能力补齐的真东西不在"把开关打开":时间臂缺一个窗口零件,图臂要先把 retain 的"米"种出来(实体解析+边+全新验收),observation 藏着一个要改 sealed 语法的缺口,而这一切之前,先得把今天只存在于测试里的生产装配点补上——D1/D3/D4→T6,仍是全部下一步的起点。</p></div>
+<div class="callout"><p>把开源 Hindsight 改造成 agentstratum,是在 27 步流程里动了 18 个环节:10 处整建制替换、5 处从无到有、1 处改上游源码、1 处砍掉,只有融合和预算两段原封不动沿用。<b>数据源上 observation/实体/图边今天就不通,流程上认证授权从 1 层变 3 层,接口上从开放 13 参数变成 6 键闭集</b>。每刀有代价(2 次会话 RPC、12 次 PG 往返、10 秒总账、答案可能被吞成 503),也有回报(证据可审计、越权 SQL 层就死、有 id 可对账)。能力补齐的真东西不在开开关:时间臂缺窗口零件,图臂要先种"米"再加全新验收,observation 藏着 sealed 语法缺口——而这一切之前,先把只存在于测试里的生产装配点补上:D1/D3/D4→T6。</p></div>
 
 <footer>
   依据:agentstratum 仓 HEAD <code>abea5ed</code> 源码;doc-06 原始 md(上游 v0.10.3);vendor=v0.10.2 实测行号;NEXT-STAGE-PLAN/TEST-PLAN/STAGED-CAPABILITIES 原文。凡涉运行时行为均标 UNKNOWN,PG 分词行为标"推断",未运行任何服务、PG 或模型。
