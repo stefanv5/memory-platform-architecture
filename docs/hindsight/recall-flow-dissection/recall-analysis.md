@@ -1,6 +1,6 @@
 # Recall 流程庖丁解牛 v5:三步看懂开源与 agentstratum 的差异
 
-> 生成:2026-10-10(v5) · 方法:8 个核查 subagent 五轮交叉审查,人工裁决 1 处矛盾,累计修正初稿 20+ 处。行号基于 agentstratum HEAD `abea5ed`;vendor=v0.10.2(`eb021da`);doc-06=上游 v0.10.3。
+> 生成:2026-10-10(v6) · 方法:9 个核查 subagent 六轮交叉审查,人工裁决 1 处矛盾,累计修正初稿 20+ 处。行号基于 agentstratum HEAD `abea5ed`;vendor=v0.10.2(`eb021da`);doc-06=上游 v0.10.3。
 > 标记:`[一手]` 亲读 · `[复核]` 独立核查 · `[推断]` PG 文档推演 · `UNKNOWN` 运行时未知。
 
 ---
@@ -244,25 +244,72 @@ receipt = await self.pg.qualify_read(..., refs, witness)  # 发送前+输出前�
 
 ---
 
-## 10. 能力补齐:需要什么→要做什么→怎么算完成
+## 10. 能力补齐·机制级:缺的是什么、上游怎么带、我们在哪一步接
 
-**C1 temporal 时间臂**(读侧,最近):需要=时间列现成,缺窗口来源。要做=①窗口二选一(调用方必传,移植面≈0;或移植上游抽取件)②解封三处(`query_http.py:128`/`query.py:622-625`/`native_query.py:226-240`)③例程加窗谓词(照 `retrieval.py:568-591`)④最小版=窗口过滤+向量排序(spreading 产品无人写,必然空转;上游有无 spreading 降级先例 `retrieval.py:687-691`)⑤全家桶+合同口径。完成=T11 新时间 gold。
+缺失类型三分类:**【源缺失】**=数据从未被生产(要补"生产线") · **【未实现】**=代码/入口不存在(要写) · **【难复用】**=上游代码在但不能直接用(说明为什么)。
 
-**C2 graph 图臂**(写侧前置,最远):需要=实体解析+实体行+kNN 边+**全新验收 oracle(实体用例数为零)**。要做=①解封四处合同(`native_retain.py:269-270`/`native_retain_http.py:255-256`/vendor `native_processor.py:170-192`;`native_sql.py:205-209` 只是形状校验)②W 计算件产出实体行(SQL 写面 7 表就绪,缺"谁算出这些行";上游实体链 `link_utils.py:282,406`+`orchestrator.py:596-769`)③kNN 边最小版 retain 期内联产(上游另有 graph_maintenance 维护期产点,产品 W 无维护循环)④补 unit_entities 实体优先索引⑤读侧移植三路 CTE(`ops_postgresql.py:941-1037`,可先单实体路)⑥全家桶。完成=实体 oracle+T11;不做维护循环须合同写明"边仅 retain 期产出"。
+### 10.1 retain 写侧注入点图(四个 ★ = 把"米"种出来的全部位置)
 
-**C3 中文 keyword**(三方案先拍板):①换 regconfig——不重嵌(embedding 独立),但 generated 列变更=新 pair,存量从 OBS 重投影;②pgroonga 后端——上游路径 `sql/postgresql.py:381-398`,产品新写分支+索引+扩展依赖,改动面最大;③维持 english+声明限制。完成=AT05c/AT11c 中文 gold+口径入合同。
+```
+W 领取(claim)→ 读原文+验哈希 → bind 模型(purpose=retain:generate+embed)→ plan 分块        [现有]
+ → compute(纯计算,无 DB 连接):LLM 抽取+嵌入                                              [现有]
+    └─ 关键事实:LLM 输出里本来就有每 fact 的 entities:list[str] —— 今天被 compute 固定丢弃
+ → ★注入1|实体名规范化+批内去重(纯 Python;复用上游 _prepare_entities_for_resolution 思路)   [未实现→补]
+ → ★注入2|新增"持连接阶段"(compute 无 pool,DB 步骤必须在此):
+      pg_trigram+共现+recency 解析 → INSERT entities 行(事务外,ON CONFLICT DO NOTHING)      [源缺失修复]
+      ※ 上游同款是纯文本方案(不是 LLM)→ 无需新增模型 purpose/绑定
+ → project_partition(现产 4 表;边仅 caused_by·entity_id=None)                             [现有]
+ → ★注入3|实体行/unit_entities/共现行 + 语义 kNN 边并入批:
+      对每个新 unit 对全库 ANN(top50·阈值≥0.7·weight=cosine 相似度本体),
+      直接复用 vendor compute_semantic_links_ann;批内 numpy 相似边合并                       [源缺失修复]
+ → ★注入4|release 语法扩展:FACT 增加第二 support 种类(BASE_FACT_SET,给 observation);
+      ENTITY(support 事实集+unit_entities 真有对)/EDGE(双端点)校验逻辑已在
+      —— 改 sealed 语法 = 新 pair                                                          [语法缺口修复]
+ → write_batch 单事务(7 表写面已就绪:行键计算已覆盖 entities/links/unit_entities/共现)      [现有]
 
-**C4 observation 读取**(读侧+隐藏缺口):读侧解封三处(`native_query_sql.py:125,228`/`query.py:622-627`/`query_http.py:140`)+G type 白名单(`gateway/query.py:98`)+based_on 加桶(`query.py:731`);**隐藏缺口**:release 例程把 FACT 硬绑 RAW_COMPLETE(`native_projection_sql.py:278`),而派生 observation 要 FACT+BASE_FACT_SET(`native_sql.py:438-448`)——D6 必须**改 sealed 的 release 语法出新 pair**。完成=产出 T9+读取 T11。
+旁路|D6 observation 生产线(另一任务类型,同样走注入4的新语法):
+   事实库 → consolidation 召回 → LLM 聚合(输出 source_fact_ids)→ source_memory_ids uuid[]
+   + proof_count —— 上游的支持集就是 memory_units.source_memory_ids(PG);observation_history 只是变更日志
 
-**C5 chunk/原文回查**:无新数据(视图已建 `native_sql.py:469-479`);要读例程(照 QP07 guard 模式)+HTTP 入口+G 转发+OBS 凭据留 H 侧。完成=D8/T11(AT08b 已有用例)。
+合同解封清单(写侧):① native_retain.py:269-270 ② native_retain_http.py:255-256
+   ③ vendor native_processor.py:170-192(compute 固定传空+accept 拒)④ native_projection_sql.py:278(FACT 硬绑 RAW_COMPLETE)
+   ※ native_sql.py:205-209 只是形状校验,不是关闭点。验收:实体 oracle 全新造(TEST-PLAN 实体用例=0)+T11
+```
 
-**C6 MM 进 Reflect**:MM 存储已在(`native_catalog.py:333`);解封五工具位中的 MM 两位(`query.py:725`;MM 有 embedding 可走 QP01 同型臂);生成侧=D6。完成=T9(AT06c 现成 gold)。
+### 10.2 recall 读侧注入点图(六个 ★ 接入口,挂产品 24 步)
 
-**C7 Pages 检索组合**:组合 store 类已存在(`native_pages.py:29-40`);**唯一硬拒点**=`native_query_authority.py:186` 精确类型检查——按 D7 合同加显式组合分支(不是删检查);retain 权威层同型检查(`native_retain_authority.py:239,325`)视需要同改。完成=T10。
+```
+步 1-2 部署/路由 ★C8 生产组合根(一切之前)+ ★C5 闭路由加原文/chunk 读路由(视图已建,凭据留 H 侧)
+步 8 闭 parse    ★C1 解封 temporal_window({start,end} tz-aware;语义=检索窗口/加分,非硬过滤器)
+步 10 Authority  ★C7 Pages 组合分支(唯一硬拒点 exact type;不是删检查)
+步 12-17 reflect ★C6 MM 两工具位解封(MM 有 embedding,走 QP01 同型向量臂;observations/expand 位依赖 C4/C2)
+步 19 QP01       ★C2 第三臂 graph(三路 CTE)+ ★C1 窗谓词 + ★C4 observation 放行(eligible+type 白名单)
+步 20 融合       ★C2 两路 RRF → 三路(vendor 原样可用);C1 另一选择:融合后 boost(不触 SQL)
+步 23-24         ★C4 based_on 加桶+响应 type 白名单放开
 
-**C8 生产组合根**:装配点一个不存在(全仓仅 3 监听点)。要做=D1 Session 启动入口、D2 两个 bank_catalog 新文件、D3 H/W 生产启动器、D4 生产 activation 构造、总装(把 forwarder 传入 `create_shared_gateway` 并拉起 H/W)、D9 部署配置。完成=T1/T2/T3/T4a/T4b/T12;中间检查点=T6。
+依赖顺序:C1 纯读侧随时可做;C2 必须先做写侧(注入1-3)读侧才有数据;
+          C4 写侧=D6,与读侧之间隔着注入4的 release 语法变更(新 pair);C8 在所有业务之前。
+```
 
-**两个最易低估**:①C2 表面"解封开关",实际新造模型侧抽取+边口径+索引+catalog 变更+oracle;②C4 看似放行,实际动 sealed release 语法出新 pair。
+### 10.3 八张能力卡
+
+**C1 temporal【未实现+难复用(思路可复用,形态须按产品合同重写)】** 缺:数据现成,缺窗口来源与参数通道。上游怎么带:HTTP body 可选 `TemporalWindow{start,end}`(tz-aware),docstring 原话"时序臂的检索窗口/加分"非硬过滤器;SQL 窗谓词+spreading。计划:★C1 步 8 解封(键集/白名单/DTO 双端 bump)+步 19 窗谓词;或步 20 后 Python boost(不触 SQL)。完成=T11 新时间 gold。
+
+**C2 graph 图臂【源缺失(主体)+未实现(计算件)+难复用(逻辑可复用,例程形态不可)】** 缺什么信息:三类行——entities 行(canonical_name/bank_id/mention_count…)、unit_entities 关联、memory_links 语义边(weight=cosine 相似度本体)。上游怎么带:原文→LLM 抽取(每 fact 已输出 `entities:list[str]`)→名字规范化/去重(纯文本)→pg_trigram+共现+recency 解析(**不是 LLM**)→事务外 INSERT entities;写事务内 unit_entities+共现;边=retain 期全库 ANN(top50·≥0.7)+批内 numpy;删除后维护期 relink_pass 补边(队列驱动非定时)。计划:★注入 1-3+读侧第三臂;合同解封四处;ENTITY/EDGE release 校验已在;**无需新增模型 purpose**。完成=实体 oracle(现空白)+T11。
+
+**C3 中文 keyword【难复用(上游可配是运行期;产品 generated 列编译期封存)】** 上游怎么带:bm25_language 配置→写列与查询同语言,切语言只影响新行。计划:三方案(换 regconfig=新 pair 不重嵌存量重投影/pgroonga=改动面最大/维持 english+声明限制)。完成=AT05c/AT11c+口径入合同。
+
+**C4 observation【源缺失(observation 没人产)+未实现(release 语法/读侧解封)】** 缺什么信息:observation 文本+支持集。上游怎么带:consolidation LLM 输出 source_fact_ids→`memory_units.source_memory_ids uuid[]`+proof_count(junction 表 Oracle-only;observation_history 只是变更日志)。计划:D6 producer 产 source_memory_ids→★注入 4 新语法→读侧解封+based_on 加桶(`gateway/query.py:98`+`query.py:731`)。完成=T9+T11。
+
+**C5 chunk/原文【未实现(入口);数据/视图都在】** 计划:★C5 步 2 加路由+新例程(照 QP07 guard 模式)+OBS 凭据留 H 侧。完成=D8/T11(AT08b 已有用例)。
+
+**C6 MM 进 Reflect【未实现(工具位);存储/嵌入列在,检索可复用 QP01 同型臂】** 计划:★C6 reflect 两工具位解封;生成侧=D6。完成=T9(AT06c 现成 gold)。
+
+**C7 Pages 检索组合【难复用(有意边界:exact type 检查)】** 计划:★C7 步 10 加显式组合分支(不是删检查);retain 权威层视需要同改。完成=T10。
+
+**C8 生产组合根【未实现(装配)】** 计划:步 1 之前的生产装配(D1/D2/D3/D4/总装/D9)。完成=T1/T2/T3/T4a/T4b/T12;中间检查点 T6。
+
+**两个最易低估**:①C2 表面"解封开关",实际新造抽取接收+解析阶段+边产出+索引+catalog 变更+**全新 oracle**——好消息:实体解析是纯文本方案,不需要新增模型 purpose;②C4 看似放行,实际动 sealed release 语法出新 pair——好消息:上游支持集字段已找到(source_memory_ids),D6 照着产即可。
 
 ---
 

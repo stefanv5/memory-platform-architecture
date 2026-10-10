@@ -1,4 +1,4 @@
-<!-- recall-analysis v5 | build 2026-10-10 13:30 CST | charset+viewport declared | repo push v5 -->
+<!-- recall-analysis v6 | build 2026-10-10 14:20 CST | charset+viewport declared | repo push v6 -->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Recall 流程庖丁解牛</title>
@@ -519,33 +519,113 @@ receipt = await self.pg.qualify_read(..., refs, witness)  # 发送前+输出前�
 <tr><td><b>验证层:STALE+全 NOT_RUN</b></td><td>指纹待重绑;真实 DataPG/L/端到端未运行</td></tr>
 </table></div>
 
-<h2><span class="no">10</span>能力补齐:需要什么 → 要做什么 → 怎么算完成</h2>
+<h2><span class="no">10</span>能力补齐·机制级:缺的是什么、上游怎么带、我们在哪一步接</h2>
 <hr class="rule">
+<p class="muted">缺失类型三分类:<b>【源缺失】</b>=数据从未被生产(要补"生产线") · <b>【未实现】</b>=代码/入口不存在(要写) · <b>【难复用】</b>=上游代码在但不能直接用(说明为什么)。每项四问:缺什么→上游怎么带→流程哪一步接(★标记,见图 7/图 8)→怎么算完成。</p>
 
-<h3>C1 · temporal 时间臂(读侧为主,最近)</h3>
-<p><b>需要什么</b>:时间列现成;缺窗口来源。<b>要做什么</b>:①窗口二选一(调用方必传,移植面≈0;或移植上游抽取件);②解封三处(<code>query_http.py:128</code>/<code>query.py:622-625</code>/<code>native_query.py:226-240</code>);③例程加窗谓词(照 <code>retrieval.py:568-591</code>);④最小版=窗口过滤+向量排序(spreading 产品无人写必空转;上游有无 spreading 降级先例 <code>retrieval.py:687-691</code>);⑤全家桶+合同口径。<b>怎么算完成</b>:T11 新时间 gold。</p>
+<figure>
+<svg viewBox="0 0 840 660" role="img" aria-label="retain 写侧注入点图:W 流程八个环节,四个星标注入点——实体名规范化、持连接解析写实体行、kNN边并入批、release语法扩展">
+  <defs><marker id="mi" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
+  <text x="420" y="20" text-anchor="middle" font-size="13" font-weight="700">retain 写侧(W 流程):四个 ★ 注入点——"米"在这里种出来</text>
+  <rect class="pBox" x="50" y="34" width="740" height="34" rx="3"/><text x="62" y="56" font-size="11.5">W 领取(claim)→ 读原文+验哈希 → bind 模型作用域(purpose=retain:generate+embed)→ plan 分块</text>
+  <line class="arr" x1="420" y1="68" x2="420" y2="78" marker-end="url(#mi)"/>
+  <rect class="pBox" x="50" y="80" width="740" height="34" rx="3"/><text x="62" y="102" font-size="11.5">compute(纯计算,无 DB 连接):LLM 抽取 + 嵌入</text>
+  <rect class="nBox" x="562" y="76" width="226" height="56" rx="3"/><text x="572" y="95" class="small">关键事实:LLM 输出里本来就有</text><text x="572" y="111" class="small">每 fact 的 entities:list[str]</text><text x="572" y="127" class="small">——今天被 compute 固定丢弃</text>
+  <line class="arr" x1="420" y1="114" x2="420" y2="124" marker-end="url(#mi)"/>
+  <rect class="pBox" x="50" y="126" width="740" height="36" rx="3" stroke-dasharray="5 3"/><text x="62" y="142" font-size="11.5">★注入 1|实体名规范化+批内去重(纯 Python:空白规范、空名/超512字符丢弃、同名合并)</text>
+  <text x="62" y="158" class="small">类型:未实现 → 复用上游 _prepare_entities_for_resolution 思路;无 DB 依赖,可在 compute 尾部做</text>
+  <line class="arr" x1="420" y1="162" x2="420" y2="172" marker-end="url(#mi)"/>
+  <rect class="pBox" x="50" y="174" width="740" height="40" rx="3" stroke-dasharray="5 3"/><text x="62" y="190" font-size="11.5">★注入 2|新增"持连接阶段"(compute 与 write_batch 之间):pg_trigram+共现+recency 解析 → INSERT entities 行</text>
+  <text x="62" y="206" font-size="11.5">(事务外,ON CONFLICT DO NOTHING)——compute 无 pool,依赖 DB 的步骤必须在此新阶段做</text>
+  <rect class="nBox" x="562" y="172" width="226" height="56" rx="3"/><text x="572" y="191" class="small">类型:源缺失修复。上游同款</text><text x="572" y="207" class="small">是纯文本方案(不是 LLM)</text><text x="572" y="223" class="small">→ 无需新增模型 purpose/绑定</text>
+  <line class="arr" x1="420" y1="214" x2="420" y2="224" marker-end="url(#mi)"/>
+  <rect class="pBox" x="50" y="226" width="740" height="30" rx="3"/><text x="62" y="246" font-size="11.5">project_partition(现产 4 表:documents/chunks/memory_units/memory_links;边仅 caused_by 且 entity_id=None)</text>
+  <line class="arr" x1="420" y1="256" x2="420" y2="266" marker-end="url(#mi)"/>
+  <rect class="pBox" x="50" y="268" width="740" height="46" rx="3" stroke-dasharray="5 3"/><text x="62" y="284" font-size="11.5">★注入 3|实体行/unit_entities/共现行 + 语义 kNN 边并入批:对每个新 unit 对全库 ANN(top50·阈值≥0.7·</text>
+  <text x="62" y="302" font-size="11.5">weight=cosine 相似度本体),直接复用 vendor compute_semantic_links_ann;批内 numpy 相似边合并</text>
+  <rect class="nBox" x="562" y="266" width="226" height="70" rx="3"/><text x="572" y="285" class="small">类型:源缺失修复。7 表写面/行键</text><text x="572" y="301" class="small">计算与 release 路径全部就绪;</text><text x="572" y="317" class="small">缺的只是"谁算出这些行"</text>
+  <line class="arr" x1="420" y1="314" x2="420" y2="324" marker-end="url(#mi)"/>
+  <rect class="pBox" x="50" y="326" width="740" height="40" rx="3" stroke-dasharray="5 3"/><text x="62" y="342" font-size="11.5">★注入 4|release 语法扩展:FACT 行增加第二 support 种类(BASE_FACT_SET,给 observation 用);</text>
+  <text x="62" y="358" font-size="11.5">ENTITY(support 事实集+unit_entities 真有对)/EDGE(双端点 support)校验逻辑已在 —— 改 sealed 语法 = 新 pair</text>
+  <line class="arr" x1="420" y1="366" x2="420" y2="376" marker-end="url(#mi)"/>
+  <rect class="pBox" x="50" y="378" width="740" height="30" rx="3"/><text x="62" y="398" font-size="11.5">write_batch 单事务(7 表写面已就绪:native_write_rows_v1;行键计算已覆盖 entities/links/unit_entities/共现)</text>
 
-<h3>C2 · graph 图臂(写侧前置,最远)</h3>
-<p><b>需要什么</b>:实体解析+实体行+kNN 边+<b>全新验收 oracle(实体用例数为零)</b>。<b>要做什么</b>:①解封四处合同(<code>native_retain.py:269-270</code>/<code>native_retain_http.py:255-256</code>/vendor <code>native_processor.py:170-192</code>);②W 计算件产出实体行(SQL 写面 7 表就绪,缺"谁算出这些行";上游实体链 <code>link_utils.py:282,406</code>+<code>orchestrator.py:596-769</code>);③kNN 边最小版 retain 期内联产(上游另有维护期产点,产品 W 无维护循环);④补 unit_entities 实体优先索引;⑤读侧移植三路 CTE(<code>ops_postgresql.py:941-1037</code>,可先单实体路);⑥全家桶。<b>怎么算完成</b>:实体 oracle+T11;不做维护循环须合同写明"边仅 retain 期产出"。</p>
+  <rect class="nBox" x="50" y="426" width="740" height="104" rx="3"/>
+  <text x="62" y="448" font-size="12" font-weight="700">旁路:D6 observation 生产线(另一任务类型,同样走 ★注入 4 的新 release 语法)</text>
+  <text x="62" y="470" font-size="11">事实库 → consolidation 召回相关事实 → LLM 聚合成 observation 文本(输出 source_fact_ids)→ 映射源事实 UUID</text>
+  <text x="62" y="490" font-size="11">→ memory_units 行(fact_type='observation', source_memory_ids=uuid[], proof_count=去重计数)——上游的支持集</text>
+  <text x="62" y="510" font-size="11">就是 source_memory_ids(PG;junction 表 Oracle-only);observation_history 只是变更日志,不是支持集本体。</text>
 
-<h3>C3 · 中文 keyword(三方案先拍板)</h3>
-<p><b>要做什么</b>:①换 regconfig——不重嵌(embedding 独立),但 generated 列变更=新 pair,存量从 OBS 重投影;②pgroonga 后端——上游路径 <code>sql/postgresql.py:381-398</code>,新写分支+索引+扩展依赖,改动面最大;③维持 english+声明限制。<b>怎么算完成</b>:AT05c/AT11c 中文 gold+口径入合同。</p>
+  <rect class="dBox" x="50" y="546" width="740" height="100" rx="3"/>
+  <text x="62" y="568" font-size="11.5" font-weight="700">合同解封清单(全部在写侧):</text>
+  <text x="62" y="588" font-size="11">① native_retain.py:269-270(decode 层 entities/resolve_entities 关闭)② native_retain_http.py:255-256(HTTP batch item)</text>
+  <text x="62" y="608" font-size="11">③ vendor native_processor.py:170-192(compute 固定传空+accept 拒)④ release 语法(native_projection_sql.py:278 把 FACT</text>
+  <text x="62" y="628" font-size="11">硬绑 RAW_COMPLETE)。注意 native_sql.py:205-209 只是形状校验,不是关闭点。验收:实体 oracle 全新造(TEST-PLAN 实体用例=0)+T11。</text>
+</svg>
+<figcaption>图 7 · retain 写侧注入点:四个 ★ 就是把"米"种出来的全部位置。注入 2/3 是源缺失修复主体;注入 1 复用上游纯文本思路;注入 4 是改 sealed 语法出新 pair。</figcaption>
+</figure>
 
-<h3>C4 · observation 读取(读侧+隐藏缺口)</h3>
-<p><b>要做什么</b>:①读侧解封三处(<code>native_query_sql.py:125,228</code>/<code>query.py:622-627</code>/<code>query_http.py:140</code>)+G type 白名单+based_on 加桶;②<b>隐藏缺口</b>:release 例程把 FACT 硬绑 RAW_COMPLETE(<code>native_projection_sql.py:278</code>),而派生 observation 要 FACT+BASE_FACT_SET(<code>native_sql.py:438-448</code>)——D6 必须<b>改 sealed 的 release 语法出新 pair</b>。<b>怎么算完成</b>:产出 T9+读取 T11。</p>
+<figure>
+<svg viewBox="0 0 840 560" role="img" aria-label="recall 读侧注入点图:产品24步流程上六个星标接入口——闭路由加原文读、parse解封窗口、authority分支、reflect工具位、QP01三臂、融合3路">
+  <defs><marker id="mj" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
+  <text x="420" y="20" text-anchor="middle" font-size="13" font-weight="700">recall 读侧(产品 24 步的压缩视图):六个 ★ 接入口</text>
+  <rect class="pBox" x="50" y="34" width="740" height="40" rx="3"/><text x="62" y="51" font-size="11.5">步 1-2 部署/路由:生产组合根(C8)+ 闭路由加一条原文/chunk 读路由(新例程+HTTP+G 转发)</text>
+  <text x="62" y="67" class="small">★C5|类型:未实现。视图已建(native_visible_chunks/documents),OBS 凭据留 H 侧</text>
+  <line class="arr" x1="420" y1="74" x2="420" y2="82" marker-end="url(#mj)"/>
+  <rect class="pBox" x="50" y="84" width="740" height="40" rx="3"/><text x="62" y="101" font-size="11.5">步 8 闭 parse:★C1 解封 temporal_window(上游形态={start,end} tz-aware;语义是"检索窗口/加分",不是硬过滤器)</text>
+  <text x="62" y="117" class="small">键集 query_http.py:128 + args 白名单 query.py:622-625 + DTO REQUEST_VERSION 双端 bump(native_query.py:29)</text>
+  <line class="arr" x1="420" y1="124" x2="420" y2="132" marker-end="url(#mj)"/>
+  <rect class="pBox" x="50" y="134" width="740" height="40" rx="3"/><text x="62" y="151" font-size="11.5">步 10 Authority:★C7 Pages 组合分支(唯一硬拒点 type(store) is NativePGStore → 加显式组合类型,不是删检查)</text>
+  <text x="62" y="167" class="small">kernel 检查天然通过;retain 权威层同型检查(native_retain_authority.py:239,325)若组合资源收 retain 需同改</text>
+  <line class="arr" x1="420" y1="174" x2="420" y2="182" marker-end="url(#mj)"/>
+  <rect class="pBox" x="50" y="184" width="740" height="40" rx="3"/><text x="62" y="201" font-size="11.5">步 12-17 H 链 reflect:★C6 MM 两工具位解封(search/read_mental_models;MM 有 embedding,走 QP01 同型向量臂)</text>
+  <text x="62" y="217" class="small">observations 位依赖 C4/D6,expand 位依赖 C2/C4——可只先解 MM 两位;存储/嵌入列已在(native_catalog.py:333)</text>
+  <line class="arr" x1="420" y1="224" x2="420" y2="232" marker-end="url(#mj)"/>
+  <rect class="pBox" x="50" y="234" width="740" height="56" rx="3"/><text x="62" y="251" font-size="11.5">步 19 QP01:★C2 第三臂 graph(读 unit_entities/links 三路 CTE)+ ★C1 窗谓词(occurred 区间相交 OR mentioned_at)</text>
+  <text x="62" y="267" font-size="11.5">+ ★C4 observation 放行(eligible 行类型+HTTP type 白名单+based_on 桶);arms 枚举 1..2→3(native_query_sql.py:225-229)</text>
+  <text x="62" y="283" class="small">注意:REQUEST_VERSION 双端同字符串校验,DTO/SQL 必须同步改</text>
+  <line class="arr" x1="420" y1="290" x2="420" y2="298" marker-end="url(#mj)"/>
+  <rect class="pBox" x="50" y="300" width="740" height="40" rx="3"/><text x="62" y="317" font-size="11.5">步 20 融合:★C2 两路 RRF → 三路 RRF(vendor reciprocal_rank_fusion 原样可用,臂列表多一项)</text>
+  <text x="62" y="333" class="small">C1 另一选择:不触 SQL,把窗做成融合后的 boost(步 20 与步 22 之间,照上游"非过滤器"语义)</text>
+  <line class="arr" x1="420" y1="340" x2="420" y2="348" marker-end="url(#mj)"/>
+  <rect class="pBox" x="50" y="350" width="740" height="40" rx="3"/><text x="62" y="367" font-size="11.5">步 23-24 复核投影:observation 进 based_on 需加桶(query.py:731 固定 world/experience);响应 type 白名单放开</text>
+  <text x="62" y="383" class="small">gateway/query.py:98 + query_http.py:140 + facade 投影</text>
 
-<h3>C5 · chunk/原文回查</h3>
-<p><b>要做什么</b>:读例程(照 QP07 guard 模式;视图已建 <code>native_sql.py:469-479</code>)+HTTP 入口+G 转发+OBS 凭据留 H 侧。<b>怎么算完成</b>:D8/T11(AT08b 已有用例)。</p>
+  <rect class="dBox" x="50" y="406" width="740" height="134" rx="3"/>
+  <text x="62" y="428" font-size="11.5" font-weight="700">读侧 vs 写侧的依赖关系(谁先谁后):</text>
+  <text x="62" y="448" font-size="11">· C1 temporal:纯读侧,随时可做(数据现成)——唯一决定是"传窗"还是"抽窗"。</text>
+  <text x="62" y="466" font-size="11">· C2 graph:必须先做写侧(图 7 注入 1-3),读侧第三臂才有数据可查;读侧本身改动不大。</text>
+  <text x="62" y="484" font-size="11">· C4 observation:写侧=D6(独立任务类型);读侧解封很小;两者之间隔着注入 4 的 release 语法变更(新 pair)。</text>
+  <text x="62" y="502" font-size="11">· C5/C6/C7:数据/存储都在,纯读侧/分支工作。· C8 组合根:在所有业务之前——没有它,下面每一条都只能在测试里跑。</text>
+</svg>
+<figcaption>图 8 · recall 读侧六个 ★ 接入口,挂在产品 24 步流程的具体步骤上;底部是读写侧依赖顺序。</figcaption>
+</figure>
 
-<h3>C6 · MM 进 Reflect</h3>
-<p><b>要做什么</b>:解封五工具位中的 MM 两位(<code>query.py:725</code>;MM 有 embedding 可走 QP01 同型臂);生成侧=D6。<b>怎么算完成</b>:T9(AT06c 现成 gold)。</p>
+<h3>C1 · temporal 时间臂【未实现 + 难复用(思路可复用,形态须按产品合同重写)】</h3>
+<p><b>缺什么</b>:数据现成(四时间列已在 QP01 通路);缺窗口来源与参数通道。<b>上游怎么带</b>:HTTP body 可选 <code>TemporalWindow{start,end}</code>(tz-aware),docstring 原话是"时序臂的检索窗口/加分",不是硬过滤器;SQL 对 occurred/mentioned 加谓词+沿边 spreading。<b>计划怎么带</b>:★C1 两处(图 8)——步 8 解封参数(键集+白名单+DTO 双端 bump),步 19 例程加窗谓词;或更省:步 20 后做 Python 侧 boost(不触 SQL)。<b>怎么算完成</b>:T11 新时间 gold。</p>
 
-<h3>C7 · Pages 检索组合</h3>
-<p><b>要做什么</b>:<b>唯一硬拒点</b>=<code>native_query_authority.py:186</code> 精确类型检查——按 D7 合同加显式组合分支(不是删检查);retain 权威层同型检查视需要同改。<b>怎么算完成</b>:T10。</p>
+<h3>C2 · graph 图臂【源缺失(主体)+ 未实现(计算件)+ 难复用(逻辑可复用,例程形态不可)】</h3>
+<p><b>缺什么信息</b>:三类行——entities 行(canonical_name/bank_id/mention_count…)、unit_entities 关联(unit↔entity)、memory_links 语义边(weight=cosine 相似度本体)。<b>上游怎么带</b>(原文→行):原文→LLM 抽取(每 fact 已输出 <code>entities:list[str]</code>)→ 名字规范化/去重(纯文本)→ pg_trigram+共现+recency 解析(<b>不是 LLM</b>)→ 事务外 INSERT entities 行 → 写事务内 unit_entities+共现行;边=retain 期对全库 ANN(top50·≥0.7)+批内 numpy 合并;删除后维护期 relink_pass 补边(队列驱动,非定时)。<b>计划怎么带</b>:★注入 1-3(图 7)+★C2 读侧第三臂(图 8);合同解封四处;ENTITY/EDGE release 校验已在。<b>无需新增模型 purpose</b>(trigram 纯文本方案)。<b>怎么算完成</b>:实体 oracle(全新造,现空白)+T11。</p>
 
-<h3>C8 · 生产组合根</h3>
-<p><b>要做什么</b>:装配点一个不存在(全仓仅 3 监听点)。D1 Session 启动入口;D2 两个 bank_catalog 新文件;D3 H/W 生产启动器;D4 生产 activation 构造;总装(forwarder 传入 <code>create_shared_gateway</code> 并拉起 H/W);D9 部署配置。<b>怎么算完成</b>:T1/T2/T3/T4a/T4b/T12;中间检查点=T6。</p>
-<div class="callout"><p><b>两个最易被低估的前置</b>:①C2 表面"解封开关",实际新造模型侧抽取+边口径+索引+catalog 变更+oracle;②C4 看似放行,实际动 sealed release 语法出新 pair。</p></div>
+<h3>C3 · 中文 keyword【难复用(上游可配是运行期;产品 generated 列编译期封存)】</h3>
+<p><b>上游怎么带</b>:bm25_language 配置→写列与查询同语言,切语言只影响新行。<b>计划怎么带</b>:三方案——①换 regconfig(生成列变更=新 pair;不重嵌,存量从 OBS 重投影);②pgroonga 后端(新写分支+索引+扩展依赖,改动面最大);③维持 english+声明限制。<b>怎么算完成</b>:AT05c/AT11c 中文 gold+口径入合同。</p>
+
+<h3>C4 · observation 读取【源缺失(observation 没人产)+ 未实现(release 语法/读侧解封)】</h3>
+<p><b>缺什么信息</b>:observation 文本+它的支持集(哪些事实)。<b>上游怎么带</b>:consolidation LLM 输出 source_fact_ids→<code>memory_units.source_memory_ids uuid[]</code>+proof_count(junction 表 Oracle-only;observation_history 只是变更日志)。<b>计划怎么带</b>:D6 producer(新任务类型)产 source_memory_ids→★注入 4 release 新语法→读侧 eligible/白名单解封+based_on 加桶。<b>怎么算完成</b>:T9+T11。</p>
+
+<h3>C5 · chunk/原文回查【未实现(入口);数据/视图都在】</h3>
+<p><b>计划怎么带</b>:★C5 步 2 加路由+新例程(照 QP07 guard 模式)+OBS 凭据留 H 侧。<b>怎么算完成</b>:D8/T11(AT08b 已有用例)。</p>
+
+<h3>C6 · MM 进 Reflect【未实现(工具位);存储/嵌入列在,检索可复用 QP01 同型臂】</h3>
+<p><b>计划怎么带</b>:★C6 reflect 两工具位解封;生成侧=D6。<b>怎么算完成</b>:T9(AT06c 现成 gold)。</p>
+
+<h3>C7 · Pages 检索组合【难复用(有意边界:exact type 检查)】</h3>
+<p><b>计划怎么带</b>:★C7 步 10 Authority 加显式组合分支(不是删检查);retain 权威层视需要同改。<b>怎么算完成</b>:T10。</p>
+
+<h3>C8 · 生产组合根【未实现(装配)】</h3>
+<p><b>计划怎么带</b>:步 1 之前的生产装配(D1 Session 入口/D2 两个 bank_catalog 新文件/D3 启动器/D4 activation 构造/总装 forwarder/D9 部署)。<b>怎么算完成</b>:T1/T2/T3/T4a/T4b/T12;中间检查点 T6。</p>
+
+<div class="callout"><p><b>两个最易被低估的前置</b>:①C2 表面"解封开关",实际新造抽取接收、解析阶段、边产出、索引、catalog 变更和<b>全新 oracle</b>——但有一个好消息:实体解析是纯文本方案,<b>不需要新增模型 purpose</b>;②C4 看似放行,实际动 sealed release 语法出新 pair——且上游支持集字段已找到(<code>source_memory_ids</code>),D6 照着产即可。</p></div>
 
 <h2><span class="no">11</span>下一步(依 NEXT-STAGE-PLAN 原文)</h2>
 <hr class="rule">
