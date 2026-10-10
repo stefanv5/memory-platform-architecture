@@ -1,0 +1,33 @@
+name: fix-html-charset
+
+# 门禁：docs/hindsight 下所有 HTML 必须在前 1024 字节内声明 charset。
+# push 后自动修正并回推（Workers Builds 会随后自动重新部署）。
+on:
+  push:
+    paths:
+      - "docs/hindsight/**/*.html"
+      - "tools/fix-html-charset.py"
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 修正缺失 charset 声明的 HTML
+        run: python3 tools/fix-html-charset.py docs/hindsight
+      - name: 有变更则提交回推
+        run: |
+          if [ -n "$(git status --porcelain -- docs/hindsight)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/hindsight
+            git commit -m "fix(html): prepend charset meta for files missing it in the first 1024 bytes [skip ci]"
+            git push
+          else
+            echo "无需修正"
+          fi
