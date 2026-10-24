@@ -1,6 +1,6 @@
 # 03a · Recall 四路检索：数据源与打分算术细看
 
-> 代码基线：`5331da2f4`（v1.0.0，2026-10-16）；本篇已随 1.0.0 增量更新（原基线 `6d8b09678`（v0.10.3），增量窗口 137 提交，v1.0.0 于 10-13 发布）。本篇是 [03 篇](03-recall-检索系统.md)的深挖伴读：03 篇讲**流程与机制**（编排、并行、为什么多路），本篇讲**数据与算术**——每个数字从哪张表哪个字段来、每一步怎么算出来。
+> 代码基线：`b4a0da1e9`（2026-10-23，含 v1.1.0）；本篇已随 1.1.0 增量更新（原基线 `5331da2f4`（v1.0.0），增量窗口 223 提交，v1.1.0 在窗口内由提交 `a5a619b5c` 发布）。**1.1.0 没有改动四条臂的 SQL 模板**（`engine/sql/` 零差异，`engine/memories/pg/recall.py` 的改动全在时间臂的 Python 日期处理），所以本篇的 SQL 摘录与算术示例仍然逐字有效；变化集中在数据侧（观察行的 `search_vector` 重建）、时间臂的日期取值、以及重排侧。本篇是 [03 篇](03-recall-检索系统.md)的深挖伴读：03 篇讲**流程与机制**（编排、并行、为什么多路），本篇讲**数据与算术**——每个数字从哪张表哪个字段来、每一步怎么算出来。
 > 素材为四份交叉互证的研究稿（数据源字典 / SQL 解剖 / 融合打分链 / 输出契约与示例），本文忠实合成、不引入新研究；研究稿间残留冲突按交叉裁决采纳（X1 = 图臂数据源与投影列；X2 = interleave 与显式 rrf 的 weight 写链），文中标注。
 > 引用格式 `相对路径:行号`，Python 代码以 `hindsight-api-slim/hindsight_api/` 为根，DDL 引 `hindsight_api/alembic/versions/`（下称 `versions/`）。仓库根下 3 个 `*_old_tmp` 临时文件为并行会话产物，未引用。
 
@@ -12,8 +12,8 @@
 
 ```mermaid
 flowchart TB
-    Q["query 文本"] --> VEC["查询向量 + tokenize_query 分词"]
-    Q --> TW["时间约束提取（无窗则整臂跳过）"]
+    Q["query 文本"] --> VEC["[1] 查询向量 + tokenize_query 分词"]
+    Q --> TW["时间窗解析 resolve_temporal_constraint<br/>（与向量化并发；无窗则整臂跳过）"]
     VEC --> SB["semantic+bm25 合并 SQL（一条 UNION ALL 一次往返）<br/>memory_units: embedding / search_vector / text / text_signals"]
     SB --> SEM["semantic 榜<br/>similarity = 1 - 余弦距离"]
     SB --> KW["bm25 榜<br/>ts_rank_cd / 各扩展 BM25 分"]
@@ -34,7 +34,7 @@ flowchart TB
     FIN --> OUT["RecallResponse<br/>scores = final / reranker / semantic / keyword"]
 ```
 
-读图要点：**"四路"是逻辑分层**——semantic 与 bm25 物理上是同一条 UNION ALL SQL 的两组子查询（每 fact_type 各一臂，`memories/pg/recall.py:28-305`），temporal 是第二条 SQL（同连接串行），graph 是按 fact_type 并行的第三批 SQL（`memories/postgres.py:125-252`）；**融合只看名次**——进 RRF 前四臂各自按自己的分数重排（`memory_engine.py:9720-9727`），`arm_scores` 只记 semantic/keyword 两臂原始分（`fusion.py:90-93`），activation 与 temporal 分此后只在 trace 可见；**输出只暴露四个分数**——`final / reranker / semantic / keyword`（`response_models.py:241-262`）。
+读图要点：**"四路"是逻辑分层**——semantic 与 bm25 物理上是同一条 UNION ALL SQL 的两组子查询（每 fact_type 各一臂，`memories/pg/recall.py:29-306`），temporal 是第二条 SQL（同连接串行），graph 是按 fact_type 并行的第三批 SQL（`memories/postgres.py:126-253`）；**融合只看名次**——进 RRF 前四臂各自按自己的分数重排（`memory_engine.py:10097-10103`），`arm_scores` 只记 semantic/keyword 两臂原始分（`fusion.py:90-93`），activation 与 temporal 分此后只在 trace 可见；**输出只暴露四个分数**——`final / reranker / semantic / keyword`（`response_models.py:285-306`）。
 
 ---
 
@@ -50,16 +50,16 @@ flowchart TB
 | `bank_id` | TEXT | NOT NULL | 银行隔离键 | 四路（首谓词） | initial_schema.py:269 |
 | `document_id` | TEXT | 可空；复合外键 `(document_id,bank_id)→documents(id,bank_id) ON DELETE CASCADE` | 来源文档 | 四路投影 | initial_schema.py:270,286-291 |
 | `text` | TEXT | NOT NULL | 事实文本 | semantic 的嵌入原文；bm25 的索引列（native/vchord 经 search_vector 派生，pg_textsearch/pgroonga/pg_search 直接建在基列）；graph/temporal 投影 | initial_schema.py:271 |
-| `embedding` | `vector(384)`（运行时可 `ALTER TYPE vector(N)` 改维度） | 可空 | 密集向量 | **semantic 主键**（`1-(embedding<=>$1)`）；temporal ANN 池；graph 种子 | initial_schema.py:272；维度默认 config.py:1338,2216；改维 migrations.py:707；语义谓词 sql/postgresql.py:336-347 |
+| `embedding` | `vector(384)`（运行时可 `ALTER TYPE vector(N)` 改维度） | 可空 | 密集向量 | **semantic 主键**（`1-(embedding<=>$1)`）；temporal ANN 池；graph 种子 | initial_schema.py:272；维度默认 config.py:1379,2216；改维 migrations.py:707；语义谓词 sql/postgresql.py:336-347 |
 | `context` | TEXT | 可空 | 事实上下文句 | bm25（native 表达式第二项；pgroonga/pg_textsearch 索引表达式；pg_search 建索引含它但查询 `should` 只打 text+text_signals）；其余路投影 | initial_schema.py:273；pg_search 查询取舍 sql/postgresql.py:413-425 |
-| `event_date` | TIMESTAMPTZ | NOT NULL→**改可空** | 旧时间字段，"kept for backward compatibility" | **不再被 temporal 窗口谓词使用**；仅初始索引族沿用 | versions/aa2b3c4d5e6f_nullable_event_date.py:31；models.py:132-134 |
-| `occurred_start` / `occurred_end` | TIMESTAMPTZ | 可空 | 事件发生区间 | **temporal**：4 种窗口重叠谓词之一 | initial_schema.py:275-276；recall.py:484-492 |
-| `mentioned_at` | TIMESTAMPTZ | 可空 | 事实被提及的时间 | **temporal**：窗口谓词 + 无 occurred 时的时间近似 | initial_schema.py:277；recall.py:488,557-564 |
+| `event_date` | TIMESTAMPTZ | NOT NULL→**改可空** | 旧时间字段，"kept for backward compatibility" | **不再被 temporal 窗口谓词使用**；仅初始索引族沿用。1.1.0 迁移 `c7e2f9a4d1b8` 把 year-1/9999 占位值从这一列清掉（retain 的时间链接 SQL 会对它做减法，PG 16 及更早遇 infinite timestamp 报错），其余三个日期列留给 Python 按"未知"处理 | versions/aa2b3c4d5e6f_nullable_event_date.py:31；models.py:138-140；versions/c7e2f9a4d1b8_clear_placeholder_memory_dates.py:1-22 |
+| `occurred_start` / `occurred_end` | TIMESTAMPTZ | 可空 | 事件发生区间 | **temporal**：4 种窗口重叠谓词之一 | initial_schema.py:275-276；recall.py:492-500 |
+| `mentioned_at` | TIMESTAMPTZ | 可空 | 事实被提及的时间 | **temporal**：窗口谓词 + 无 occurred 时的时间近似 | initial_schema.py:277；recall.py:496,566-572 |
 | `fact_type` | TEXT | NOT NULL default `'world'`；CHECK 演化见 1.2 | 事实类型（分片谓词） | 四路（每个 UNION 臂内联字面量过滤；部分索引谓词） | initial_schema.py:278,293-295 |
 | `confidence_score` | Float | 可空，0..1 CHECK | 置信度 | 四路不直接消费（rerank 前不参与） | initial_schema.py:279,296-305；opinion 专属约束删除+重加 versions/g2h3i4j5k6l7_remove_opinion_fact_type.py:44,58 |
 | `access_count` | Integer | 已**删除** | —— | —— | versions/e4a7c1b9d2f6_drop_memory_units_access_count.py:56 |
-| `metadata` | JSONB | default `'{}'` | 用户元数据 | semantic/bm25/temporal 投影；**graph 臂投影不含 metadata**（X1 裁决：MEMORY_UNIT_COLUMNS 契约与种子自查均无此列） | initial_schema.py:281-283；投影列 recall.py:115-118,472-475,631；graph 契约 ops.py:45-58、link_expansion.py:95-97 |
-| `created_at`/`updated_at` | TIMESTAMPTZ | default `now()` | 创建/最后更新 | **四路的 `created_after/before` 实际过滤 `updated_at`** | initial_schema.py:284-285；recall.py:149-164 注释 |
+| `metadata` | JSONB | default `'{}'` | 用户元数据 | semantic/bm25/temporal 投影；**graph 臂投影不含 metadata**（X1 裁决：MEMORY_UNIT_COLUMNS 契约与种子自查均无此列） | initial_schema.py:281-283；投影列 recall.py:116-119,479-482,628；graph 契约 ops.py:45-58、link_expansion.py:95-97 |
+| `created_at`/`updated_at` | TIMESTAMPTZ | default `now()` | 创建/最后更新 | **四路的 `created_after/before` 实际过滤 `updated_at`** | initial_schema.py:284-285；recall.py:150-165 注释 |
 | `search_vector` | tsvector / bm25vector / TEXT（随后端） | 曾 GENERATED，后 DROP EXPRESSION | 全文检索向量 | **bm25 主键** | §1.3 |
 | `text_signals` | TEXT | 可空 | 实体名等去规范化拼接（增广 BM25） | **bm25**（native 第三项；pg_search should 字段；pgroonga 表达式） | versions/a2b3c4d5e6f7_add_text_signals_column.py:1-14,54 |
 | `chunk_id` | TEXT | 可空；FK→chunks ON DELETE SET NULL；`idx_memory_units_chunk_id` | 来源 chunk | 四路投影 | versions/b7c4d8e9f1a2_add_chunks_table.py:49-57 |
@@ -73,7 +73,7 @@ flowchart TB
 
 ### 1.2 fact_type CHECK 演化
 
-**fact_type CHECK 演化**：初始 `('world','bank','opinion','observation')`（initial_schema.py:294）→ `bank`→`experience`（d9f6a3b4c5e2:33-39）→ 删 opinion（g2h3i4j5k6l7:50，随后 i4d5e6f7g8h9 删行）→ 加 `mental_model`（p1k2l3m4n5o6:127）→ **t5o6p7q8r9s0_rename_mental_models_to_observations.py:50 定稿 `('world','experience','opinion','observation')`**。注意：SQLAlchemy 模型 `models.py:164` 与 Oracle 基线 `versions/o1a2b3c4d5e6_oracle_baseline.py:133` 都是三值 `('world','experience','observation')`，与 PG 迁移定稿的四值存在模型/迁移分歧（存疑，见 §6.3）。部分向量索引只为 `world/experience/observation` 三类建（d5e6f7a8b9c0:38-42；retain/bank_utils.py:33-37）。
+**fact_type CHECK 演化**：初始 `('world','bank','opinion','observation')`（initial_schema.py:294）→ `bank`→`experience`（d9f6a3b4c5e2:33-39）→ 删 opinion（g2h3i4j5k6l7:50，随后 i4d5e6f7g8h9 删行）→ 加 `mental_model`（p1k2l3m4n5o6:127）→ **t5o6p7q8r9s0_rename_mental_models_to_observations.py:50 定稿 `('world','experience','opinion','observation')`**。注意：SQLAlchemy 模型 `models.py:170` 与 Oracle 基线 `versions/o1a2b3c4d5e6_oracle_baseline.py:133` 都是三值 `('world','experience','observation')`，与 PG 迁移定稿的四值存在模型/迁移分歧（存疑，见 §6.3）。部分向量索引只为 `world/experience/observation` 三类建（d5e6f7a8b9c0:38-42；retain/bank_utils.py:33-37）。
 
 ### 1.3 `search_vector` 的形态演化与五种全文后端
 
@@ -85,23 +85,25 @@ flowchart TB
 2. `a2b3c4d5e6f7`：native 表达式加入 `COALESCE(text_signals,'')`（versions/a2b3c4d5e6f7:59-69）。
 3. **`p4q5r6s7t8u9`：`ALTER COLUMN search_vector DROP EXPRESSION` 降级为普通 tsvector**，改为应用层 INSERT 时填充，以支持可配置语言（versions/p4q5r6s7t8u9_configurable_bm25_language.py:127-139）。
 
-**HEAD 填充代码**（单一来源 `engine/db/ops_postgresql.py:25-60 pg_search_vector_expr`）：native→`to_tsvector('<text_search_extension_native_language>'::regconfig, text || ' ' || context || ' ' || text_signals)`（:57-59；语言经 `HindsightConfig.validate()` 校验为合法 PG 标识符后内联）；vchord→`tokenize(text||' '||context||' '||text_signals, 'llmlingua2')::bm25_catalog.bm25vector`（:55-56）；pg_textsearch / pg_search / pgroonga→返回 `None`——索引直接建在基列上，`search_vector` 保持空（:38-42 注释）。写入位点：retain 批量 INSERT 的 SELECT 内联（ops_postgresql.py:205-246，`$15` 为 text_signals，JSON 数组经 `unnest` CTE）；编辑路径 `engine/memories/pg/writes.py:580-599`（用绑定参数 `$3/$4` 而非列引用，避免看到旧值）；curation 恢复重建 writes.py:479-495。
+**HEAD 填充代码**（单一来源 `engine/db/ops_postgresql.py:25-61 pg_search_vector_expr`）：native→`to_tsvector('<text_search_extension_native_language>'::regconfig, text || ' ' || context || ' ' || text_signals)`（:60；语言经 `HindsightConfig.validate()` 校验为合法 PG 标识符后内联）；vchord→`tokenize(text||' '||context||' '||text_signals, 'llmlingua2')::bm25_catalog.bm25vector`（:58）；pg_textsearch / pg_search / pgroonga→返回 `None`——索引直接建在基列上，`search_vector` 保持空（:38-42 注释）。写入位点：retain 批量 INSERT 的 SELECT 内联（ops_postgresql.py:205-246，`$15` 为 text_signals，JSON 数组经 `unnest` CTE）；编辑路径 `engine/memories/pg/writes.py:555-605`（用绑定参数 `$3/$4` 而非列引用，避免看到旧值）；curation 恢复重建 writes.py:490-505。
 
-**五种后端**（由 `HINDSIGHT_API_TEXT_SEARCH_EXTENSION` 选：`native | vchord | pg_textsearch | pgroonga | pg_search`，config.py:713,1581；initial_schema.py:98-157 检测/建扩展）。索引形态（初始迁移 + 运行时对账 `migrations.py:1106-1188 _create_text_search_index`，统一叫 `idx_memory_units_text_search`）：
+**五种后端**（由 `HINDSIGHT_API_TEXT_SEARCH_EXTENSION` 选：`native | vchord | pg_textsearch | pgroonga | pg_search`，config.py:751,1633；initial_schema.py:98-157 检测/建扩展）。索引形态（初始迁移 + 运行时对账 `migrations.py:1116-1199 _create_text_search_index`，统一叫 `idx_memory_units_text_search`）：
 
 | 后端 | 索引形态 | 证据 |
 |---|---|---|
-| native | `USING gin(search_vector)` | initial_schema.py:397-402；migrations.py:1180-1188 |
+| native | `USING gin(search_vector)` | initial_schema.py:397-402；migrations.py:1190-1197 |
 | vchord | `USING bm25 (search_vector bm25_catalog.bm25_ops)` | initial_schema.py:372-377 |
-| pg_textsearch | **双形态**：初始迁移建单列 `USING bm25(text) WITH (text_config='english')`（:380 注释 "pg_textsearch doesn't support expressions"）；运行时对账层改为**表达式** `USING bm25((COALESCE(text,'')||' '||COALESCE(context,''))) WITH (text_config='english')`（migrations.py:1127-1142）——两者不等价，对账层负责把旧库收敛到表达式形态 | initial_schema.py:378-385 |
-| pgroonga | `USING pgroonga(text||context||text_signals) WITH (tokenizer='TokenBigram', normalizer='NormalizerNFKC150')` | migrations.py:1143-1162 |
-| pg_search | `USING bm25 (id, text, context, text_signals …) WITH (key_field='id')`，tokenizer 可配 | initial_schema.py:386-396；migrations.py:1163-1179 |
+| pg_textsearch | **双形态**：初始迁移建单列 `USING bm25(text) WITH (text_config='english')`（:380 注释 "pg_textsearch doesn't support expressions"）；运行时对账层改为**表达式** `USING bm25((COALESCE(text,'')||' '||COALESCE(context,''))) WITH (text_config='english')`（migrations.py:1144-1151）——两者不等价，对账层负责把旧库收敛到表达式形态 | initial_schema.py:378-385 |
+| pgroonga | `USING pgroonga(text||context||text_signals) WITH (tokenizer='TokenBigram', normalizer='NormalizerNFKC150')` | migrations.py:1153-1172 |
+| pg_search | `USING bm25 (id, text, context, text_signals …) WITH (key_field='id')`，tokenizer 可配 | initial_schema.py:386-396；migrations.py:1174-1189 |
 
-初始的 `memory_units_bm25` 物化视图及其 GIN（initial_schema.py:404-416）已被 versions/f3a5b7c9d1e2_drop_memory_units_bm25_matview.py 废弃。BM25 开关：per-bank `enable_text_search`（无 token 即跳过整个 bm25 臂，recall.py:92-95,138）。
+初始的 `memory_units_bm25` 物化视图及其 GIN（initial_schema.py:404-416）已被 versions/f3a5b7c9d1e2_drop_memory_units_bm25_matview.py 废弃。BM25 开关：per-bank `enable_text_search`（无 token 即跳过整个 bm25 臂，recall.py:96-97,138）。
+
+**观察行是第三种形态（1.1.0 明确化，#5299）**：`observation` 的 `search_vector` 只由 `text` 一列生成——`observation_search_vector_expr` 调 `pg_search_vector_expr(..., context_col=None, signals_col=None)`（`engine/memories/pg/consolidation.py:37-45`），所以观察的 `context` 与 `text_signals` 从不进关键词索引。同一个表达式被三处写路径共用（插入 :338、折叠 :168/:237、改写 :281 经 `_search_vector_clause` :22-34），Oracle 返回 `None`（它的 text index 自维护）。改动前三条改写/折叠路径其实都会重建 `search_vector`，但用的是 `_native_search_vector_update`——**只覆盖 native，vchord 返回空串**（基线 `consolidation.py:115/185/229` 调它）：`bm25vector` 是普通列、没人刷新，observation 被改写或折叠后关键词臂仍匹配旧措辞；同一段表达式还在插入路径另写了一份。现在三条路径与插入共用同一个 `observation_search_vector_expr`；`repair-bank` 另有一次性重建（`pg/admin.py:224-252`，仅 vchord：`bm25vector` 不可比较，挑不出陈旧行，只能全量重建）。
 
 ### 1.4 索引族：四路各踩哪些索引
 
-一句人话：这套路由设计里"索引谓词"和"SQL 谓词"是配对生长的——SQL 里写什么字面量，索引就按什么建部分索引，planner 才肯走索引而不是全表扫。**向量索引（semantic / temporal / graph 种子共用）**——per-(bank_id, fact_type) 部分索引族：`d5e6f7a8b9c0` 遍历 `banks` 行建 `idx_mu_emb_{worl|expr|obsv}_{internal_id 前16hex}`，谓词 `WHERE fact_type='<ft>' AND bank_id='<escaped>'`（versions/d5e6f7a8b9c0_add_bank_internal_id_and_per_bank_hnsw.py:38-42,103-117）。动机：只有 (bank,fact_type) 双谓词都命中部分索引，planner 才会弃用 `idx_memory_units_bank_id` B-tree（文件头注释 :16-22）。新银行在建行事务内建（bank_utils.py:40-47,103-119）；`HINDSIGHT_API_VECTOR_INDEX_MIN_ROWS`>0 时改为惰性+维护操作（bank_utils.py:106-118；`_vector_index.py:256-330` 建/留阈值与滞回）。**初始全局索引** `idx_memory_units_embedding`（initial_schema.py:362-368）在 `d5e6f7a8b9c0` 对非 ScaNN 后端**删除**（:92-93；ScaNN 保留全局、filtered scan，:79-84），残留兜底清理 f2a6d8c4b1e9:68。**操作符类/参数**（`_vector_index.py:36-42`）：pgvector→`hnsw (embedding vector_cosine_ops)`；pgvectorscale→`diskann ... WITH (num_neighbors=50)`；pg_diskann→`WITH (max_neighbors=50)`；vchord→`vchordrq (embedding vector_cosine_ops)`；scann→`scann (embedding cosine) WITH (mode='AUTO')`；类型错配重建 a4b5c6d7e8f9:96-122，vchord opclass 重建 b8c9d0e1f2a3。**运行时调参**（`_vector_index.py`）：两档 GUC（PostgreSQL 会话级配置参数）——low_latency（retain 侧探测）`hnsw.ef_search=60` + `iterative_scan=off`（:133-134）；high_recall（连接池初始化）`ef_search=200` + `iterative_scan=strict_order` + `hnsw.max_scan_tuples=ann_max_scan_tuples()`（:136-143）；iterative_scan 使 ef_search 变"批量"而非上限（:120-128），总开关 `config.ann_iterative_scan`（:63-99），分发器 `ann_search_tuning_settings(ext, kind)`（:227-248）。**semantic 臂的候选深度由连接设置控制而非多取行**（recall.py:63-70 注释）。
+一句人话：这套路由设计里"索引谓词"和"SQL 谓词"是配对生长的——SQL 里写什么字面量，索引就按什么建部分索引，planner 才肯走索引而不是全表扫。**向量索引（semantic / temporal / graph 种子共用）**——per-(bank_id, fact_type) 部分索引族：`d5e6f7a8b9c0` 遍历 `banks` 行建 `idx_mu_emb_{worl|expr|obsv}_{internal_id 前16hex}`，谓词 `WHERE fact_type='<ft>' AND bank_id='<escaped>'`（versions/d5e6f7a8b9c0_add_bank_internal_id_and_per_bank_hnsw.py:38-42,103-117）。动机：只有 (bank,fact_type) 双谓词都命中部分索引，planner 才会弃用 `idx_memory_units_bank_id` B-tree（文件头注释 :16-22）。新银行在建行事务内建（`create_bank_vector_indexes`，bank_utils.py:104-183）；`HINDSIGHT_API_VECTOR_INDEX_MIN_ROWS`>0 时改为惰性+维护操作（bank_utils.py:139-152 的 eager 判定；`_vector_index.py:256-330` 建/留阈值与滞回）。**1.1.0 未改动这一族索引**（`engine/sql/` 与迁移 `d5e6f7a8b9c0` 均无差异）；同版本新增的迁移 `e8c1a4f7b2d9` 是修维度的 repair（把 embedding resize 后残留的全局向量索引从 per-bank 后端删掉，#5707），不改查询路径。**初始全局索引** `idx_memory_units_embedding`（initial_schema.py:362-368）在 `d5e6f7a8b9c0` 对非 ScaNN 后端**删除**（:92-93；ScaNN 保留全局、filtered scan，:79-84），残留兜底清理 f2a6d8c4b1e9:68。**操作符类/参数**（`_vector_index.py:36-42`）：pgvector→`hnsw (embedding vector_cosine_ops)`；pgvectorscale→`diskann ... WITH (num_neighbors=50)`；pg_diskann→`WITH (max_neighbors=50)`；vchord→`vchordrq (embedding vector_cosine_ops)`；scann→`scann (embedding cosine) WITH (mode='AUTO')`；类型错配重建 a4b5c6d7e8f9:96-122，vchord opclass 重建 b8c9d0e1f2a3。**运行时调参**（`_vector_index.py`）：两档 GUC（PostgreSQL 会话级配置参数）——low_latency（retain 侧探测）`hnsw.ef_search=60` + `iterative_scan=off`（:133-134）；high_recall（连接池初始化）`ef_search=200` + `iterative_scan=strict_order` + `hnsw.max_scan_tuples=ann_max_scan_tuples()`（:136-143）；iterative_scan 使 ef_search 变"批量"而非上限（:120-128），总开关 `config.ann_iterative_scan`（:63-99），分发器 `ann_search_tuning_settings(ext, kind)`（:227-248）。**semantic 臂的候选深度由连接设置控制而非多取行**（recall.py:66-74 注释）。
 
 **全文索引**：§1.3 表格所列五后端形态，统一 `idx_memory_units_text_search`。**temporal 日期部分索引**：`(bank_id, fact_type, occurred_start|occurred_end|mentioned_at)` 各自 `WHERE col IS NOT NULL`，CONCURRENTLY（versions/b3c4d5e6f7g8_add_temporal_date_indexes.py:44-60）；初始迁移的三级日期索引 `idx_memory_units_event_date/_bank_date/_bank_type_date`（initial_schema.py:336-343）以旧字段 `event_date` 为键——recall 运行时不用（§1.1 event_date 行）。
 
@@ -121,8 +123,8 @@ flowchart TB
 
 一句人话：四个 `enable_*` 开关住在 `banks.config` JSONB 里（层级可配字段），其中**没有 "enable semantic"**——语义臂恒开，关不掉。
 
-- 初始列：`bank_id` PK、`name`、`personality` JSONB、`background`、`created_at`、`updated_at`（initial_schema.py:183-198）；后 `personality`→`disposition`（versions/rename_personality_to_disposition.py）、`background`→mission 由 config 承接（`reflect_mission`，config.py:3652）。`internal_id` UUID UNIQUE default `gen_random_uuid()`——per-bank 索引名的熵源（d5e6f7a8b9c0:72-76）。**`config` JSONB NOT NULL default `'{}'` + GIN `idx_banks_config`**（versions/x9s0t1u2v3w4_add_bank_config_column.py:37-47）：per-bank 检索开关存于其中（Python 字段名格式）。
-- **检索四开关**（层级字段，`_CONFIGURABLE_FIELDS` 含之，config.py:4013-4016）：`enable_text_search`、`enable_temporal_retrieval`、`enable_graph_retrieval`、`enable_reranking`（config.py:3657-3660）；env `HINDSIGHT_API_ENABLE_*`，**默认全 True**（config.py:2063-2066）。**没有 "enable semantic/embeddings" 开关**——semantic 臂恒开；BM25 臂受 `enable_text_search` 门控（memory_engine.py:9157-9161,20038-20050；recall.py:43-44）。
+- 初始列：`bank_id` PK、`name`、`personality` JSONB、`background`、`created_at`、`updated_at`（initial_schema.py:183-198）；后 `personality`→`disposition`（versions/rename_personality_to_disposition.py）、`background`→mission 由 config 承接（`reflect_mission`，config.py:3755）。`internal_id` UUID UNIQUE default `gen_random_uuid()`——per-bank 索引名的熵源（d5e6f7a8b9c0:72-76）。**`config` JSONB NOT NULL default `'{}'` + GIN `idx_banks_config`**（versions/x9s0t1u2v3w4_add_bank_config_column.py:37-47）：per-bank 检索开关存于其中（Python 字段名格式）。
+- **检索四开关**（层级字段，`_CONFIGURABLE_FIELDS` 含之，config.py:4118-4121）：`enable_text_search`、`enable_temporal_retrieval`、`enable_graph_retrieval`、`enable_reranking`（config.py:3760-3763）；env `HINDSIGHT_API_ENABLE_*`，**默认全 True**（config.py:2121-2124）。**没有 "enable semantic/embeddings" 开关**——semantic 臂恒开；BM25 臂受 `enable_text_search` 门控（memory_engine.py:9498-9501,20411-20425；recall.py:94-97）。
 
 ### 1.7 辅助数据源
 
@@ -131,8 +133,8 @@ flowchart TB
 - **tags**：数组列 `memory_units.tags VARCHAR[]`（非关联表），GIN 索引；过滤语义在 engine/search/tags.py:197-222（any=`&&`/exact=`@>`、空集=仅未打标行）；tag_groups（标签组）是同一数组列上的复合谓词（build_tag_groups_where_clause）；documents 也有同名 tags 列（g2a3b4c5d6e7:41）。
 - **pg_stats（BM25 选词）**：native 后端从 `pg_stats.most_common_elems` / `most_common_elem_freqs`（`search_vector` 列的统计直方图）查候选词项文档频率，避免全表扫（engine/search/bm25_term_selection.py:70-79，详见 §2.3）。
 - **observation_sources 仅 Oracle**：PG 走 `memory_units.source_memory_ids` 原生数组；junction 表 `observation_sources`（observation_id/source_id）仅 Oracle 使用——基类默认 True（engine/db/ops.py:346-352），PG 覆写 False（ops_postgresql.py:83-84），versions/k6l7m8n9o0p1 的 `_pg_upgrade` 在 PG 为 pass（:24-26）。
-- **失效归档**：`invalidated_memory_units` 由 `LIKE memory_units` 建成但**不含 `embedding`/`search_vector`**（`_ARCHIVE_OMITTED`，writes.py:344-356）——recall/consolidation/graph 永不带"是否有效"谓词；恢复时按当前后端重建 search_vector、重嵌入（writes.py:479-502）。
-- **`chunks`**：recall 投影携带 `chunk_id`（FK SET NULL），`recall_include_chunks`/`recall_chunks_max_tokens` 决定 chunk 是否入结果（config.py:3666/:3668）。
+- **失效归档**：`invalidated_memory_units` 由 `LIKE memory_units` 建成但**不含 `embedding`/`search_vector`**（`_ARCHIVE_OMITTED`，writes.py:359-380）——recall/consolidation/graph 永不带"是否有效"谓词；恢复时按当前后端重建 search_vector、重嵌入（writes.py:490-505）。
+- **`chunks`**：recall 投影携带 `chunk_id`（FK SET NULL），`recall_include_chunks`/`recall_chunks_max_tokens` 决定 chunk 是否入结果（config.py:3769/:3771）。
 
 ---
 
@@ -142,23 +144,23 @@ flowchart TB
 
 一句人话：四条臂共用同一个 `limit`（= thinking_budget），各臂内部再换算；ANN 的"取多深"不靠行数靠连接设置。
 
-调用链：`memory_engine.recall_async`（memory_engine.py:8909）→ `thinking_budget = _resolve_thinking_budget(...)`（:9140）→ `retrieve_all_fact_types_parallel`（:9631）→ `recall_unified(limit=thinking_budget)`（search/retrieval.py:191-209）→ `PostgresMemories.recall_unified`（memories/postgres.py:125）：① `search` → `retrieve_semantic_bm25_combined_sql`（postgres.py:296 / pg/recall.py:28）；② `temporal_search` → `retrieve_temporal_combined_sql`（postgres.py:333 / pg/recall.py:374，同连接串行 postgres.py:177-211）；③ 图臂 `LinkExpansionRetriever.retrieve(budget=limit)`（postgres.py:222-239，连接释放后按 fact_type 并行 ：215-242）。
+调用链：`memory_engine.recall_async`（memory_engine.py:9261）→ **时间窗解析与查询向量化并发**（`resolve_temporal_constraint`，memory_engine.py:9853-9863）→ `thinking_budget = _resolve_thinking_budget(...)`（:9491）→ `retrieve_all_fact_types_parallel`（:10021，带 `temporal_resolved=True`）→ `recall_unified(limit=thinking_budget)`（search/retrieval.py:218-236）→ `PostgresMemories.recall_unified`（memories/postgres.py:126）：① `search` → `retrieve_semantic_bm25_combined_sql`（postgres.py:268 / pg/recall.py:29）；② `temporal_search` → `retrieve_temporal_combined_sql`（postgres.py:317 / pg/recall.py:382，同连接串行 postgres.py:179-212）；③ 图臂 `LinkExpansionRetriever.retrieve(budget=limit)`（postgres.py:223-240，连接释放后按 fact_type 并行 ：215-243）。
 
-- **ANN 深度不是行数而是连接设置**：`_ANN_TUNING_HIGH_RECALL` = `hnsw.ef_search=200` + `hnsw.iterative_scan=strict_order` + `hnsw.max_scan_tuples`（`_vector_index.py:136-143`，值按查询由 `ann_search_tuning_settings` :227-248 填）。`strict_order` 保证行按距离序到达（:124-126），这是 Python 端"取前缀即前 limit 名"的前提。整个并行检索包在 `budgeted_operation` 内执行，连接预算 `recall_connection_budget` 默认 4（config.py:1706，me:9645-9651）。
+- **ANN 深度不是行数而是连接设置**：`_ANN_TUNING_HIGH_RECALL` = `hnsw.ef_search=200` + `hnsw.iterative_scan=strict_order` + `hnsw.max_scan_tuples`（`_vector_index.py:136-143`，值按查询由 `ann_search_tuning_settings` :227-248 填）。`strict_order` 保证行按距离序到达（:124-126），这是 Python 端"取前缀即前 limit 名"的前提。整个并行检索包在 `budgeted_operation` 内执行，连接预算 `recall_connection_budget` 默认 4（config.py:1759，me:10015-10021）。注意窗口**不在** store 里解析：1.1.0 起引擎先算好 `(start, end)`，`recall_unified` 只负责按它发时间 SQL（`retrieval.py:218-236` 的 `temporal_window=temporal_constraint`）——这保证整单包办的 store 与本地管线对同一句查询得到同一个窗口。
 
 ### 2.2 semantic 臂（与 BM25 同一条 UNION 语句）
 
-一句人话：每个 fact_type 生成一个子查询，用余弦距离换算相似度、卡一个可配下限，按距离排序取前 N 行——靠 per-bank 部分 HNSW 索引做到"排序即索引序"。输入参数（pg/recall.py:28-44）：`query_emb_str`(→$1)、`query_text`、`bank_id`(→$2)、`fact_types`、`limit`、tags、min_semantic/min_keyword（请求级分数下限）、graph_seed_min_similarity、enable_text_search。**SQL 生成**：每个 fact_type 一臂，`dialect.build_semantic_arm`（sql/postgresql.py:320-349），PG 形态：
+一句人话：每个 fact_type 生成一个子查询，用余弦距离换算相似度、卡一个可配下限，按距离排序取前 N 行——靠 per-bank 部分 HNSW 索引做到"排序即索引序"。输入参数（pg/recall.py:29-45）：`query_emb_str`(→$1)、`query_text`、`bank_id`(→$2)、`fact_types`、`limit`、tags、min_semantic/min_keyword（请求级分数下限）、graph_seed_min_similarity、enable_text_search。**SQL 生成**：每个 fact_type 一臂，`dialect.build_semantic_arm`（sql/postgresql.py:320-349），PG 形态：
 
 ```sql
 (SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at,
-        fact_type, document_id, chunk_id, tags, metadata, proof_count,          -- cols, recall.py:115-118
+        fact_type, document_id, chunk_id, tags, metadata, proof_count,          -- cols, recall.py:116-119
         1 - (embedding <=> $1::vector) AS similarity,
         NULL::float AS bm25_score,
         'semantic' AS source
  FROM memory_units
  WHERE bank_id = $2
-   AND fact_type = '<ft>'                                    -- 内联字面量（受控枚举, recall.py:72-73）
+   AND fact_type = '<ft>'                                    -- 内联字面量（受控枚举, recall.py:73-74）
    AND embedding IS NOT NULL
    AND (1 - (embedding <=> $1::vector)) >= <sem_min>          -- postgresql.py:343
    <tags_clause> <groups_clause> <updated_range_clause>
@@ -169,18 +171,18 @@ flowchart TB
 逐谓词：
 
 - **相似度表达式** `1 - (embedding <=> $1::vector)`：`<=>` 是 pgvector 余弦距离，1−距离=相似度（postgresql.py:210-211 `vector_similarity`；`vector_distance` 在 :207-208）。
-- **`fact_type = '<ft>'` 内联字面量**：值来自内部枚举非用户输入（recall.py:72-73）；与 `bank_id` 用绑定参数 $2 形成对照（X1 修正措辞：**字面量是 fact_type，绑定参数是 bank_id**）。这个字面量同时是 partial HNSW 索引谓词的一半。`embedding IS NOT NULL`（postgresql.py:342）：partial 索引不含 NULL embedding 行，防 seq scan。
-- **相似度下限 `>= sem_min`**：请求级 `min_scores.semantic` 覆盖全局 `config.semantic_min_similarity`（recall.py:97-101）。
-- **updated_range_clause**（recall.py:154-164）：`created_after/before` 名为 created 实过滤 `updated_at > $n / < $m`——语义是"窗口内被写过/刷新过"，供 mental-model 增量刷新水位用（recall.py:149-151）。
-- **LIMIT 是内联字面量** `semantic_fetch = max(limit, GRAPH_SEED_LIMIT=20 若 graph 阈值可达)`（recall.py:103-113）。设计注释（recall.py:63-70）：不再 `limit*5` 过取——行已按距离序，过取的行必被丢弃；ANN 质量由连接上 iterative_scan 决定。graph 阈值仅当 `sem_min <= graph_seed_min_similarity`（recall.py:108-112）才生效——否则稠密臂的 SQL 阈值截掉的高度相似行会让图臂种子失真，此时图臂自查（见 §2.6）。
+- **`fact_type = '<ft>'` 内联字面量**：值来自内部枚举非用户输入（recall.py:73-74）；与 `bank_id` 用绑定参数 $2 形成对照（X1 修正措辞：**字面量是 fact_type，绑定参数是 bank_id**）。这个字面量同时是 partial HNSW 索引谓词的一半。`embedding IS NOT NULL`（postgresql.py:342）：partial 索引不含 NULL embedding 行，防 seq scan。
+- **相似度下限 `>= sem_min`**：请求级 `min_scores.semantic` 覆盖全局 `config.semantic_min_similarity`（recall.py:101-102）。
+- **updated_range_clause**（recall.py:155-165）：`created_after/before` 名为 created 实过滤 `updated_at > $n / < $m`——语义是"窗口内被写过/刷新过"，供 mental-model 增量刷新水位用（recall.py:150-152）。
+- **LIMIT 是内联字面量** `semantic_fetch = max(limit, GRAPH_SEED_LIMIT=20 若 graph 阈值可达)`（recall.py:106-114）。设计注释（recall.py:66-74）：不再 `limit*5` 过取——行已按距离序，过取的行必被丢弃；ANN 质量由连接上 iterative_scan 决定。graph 阈值仅当 `sem_min <= graph_seed_min_similarity`（recall.py:111-114）才生效——否则稠密臂的 SQL 阈值截掉的高度相似行会让图臂种子失真，此时图臂自查（见 §2.6）。
 
-**HNSW 命中**：每 bank 每 fact_type 一条 partial 索引 `idx_mu_emb_{ft}_{internal_id} ... USING hnsw (embedding vector_cosine_ops) WHERE fact_type='<ft>' AND bank_id='<bank>'`（运行时创建 ops_postgresql.py:1283-1296；迁移 d5e6f7a8b9c0 先 DROP 旧全局 partial 索引再按 bank 重建 :88-115）。WHERE 的 `fact_type` 字面量与索引谓词逐字匹配；`bank_id` 是绑定参数 $2，与索引谓词内联字面量的匹配靠 planner 对参数值的推断（custom plan 时成立）；`ORDER BY embedding <=> $1` 供 planner 直接走索引序，语义臂因此不需要外层窗口函数（旧 ROW_NUMBER+PARTITION BY 写法会强制全表扫，recall.py:54-61 注释）。Oracle 形态（sql/oracle.py:224-255）：`1 - VECTOR_DISTANCE(embedding, :1, COSINE)`，`FETCH FIRST n ROWS ONLY`，整个臂包 `SELECT * FROM (...) t`——UNION ALL 分支内行限子句必须派生表。
+**HNSW 命中**：每 bank 每 fact_type 一条 partial 索引 `idx_mu_emb_{ft}_{internal_id} ... USING hnsw (embedding vector_cosine_ops) WHERE fact_type='<ft>' AND bank_id='<bank>'`（运行时创建 ops_postgresql.py:1285-1298；迁移 d5e6f7a8b9c0 先 DROP 旧全局 partial 索引再按 bank 重建 :88-115）。WHERE 的 `fact_type` 字面量与索引谓词逐字匹配；`bank_id` 是绑定参数 $2，与索引谓词内联字面量的匹配靠 planner 对参数值的推断（custom plan 时成立）；`ORDER BY embedding <=> $1` 供 planner 直接走索引序，语义臂因此不需要外层窗口函数（旧 ROW_NUMBER+PARTITION BY 写法会强制全表扫，recall.py:54-61 注释）。Oracle 形态（sql/oracle.py:224-255）：`1 - VECTOR_DISTANCE(embedding, :1, COSINE)`，`FETCH FIRST n ROWS ONLY`，整个臂包 `SELECT * FROM (...) t`——UNION ALL 分支内行限子句必须派生表。
 
 ### 2.3 BM25 臂
 
-一句人话：分词后拼一个 tsquery 文本作为一个绑定参数传进 SQL，native 后端用 `ts_rank_cd` 打分、`@@` 当匹配门；四种扩展后端各换一套算子，但语句骨架相同。**门控**（recall.py:92-95）：`tokens = tokenize_query(query_text) if enable_text_search else []`；tokens 为空 → 整臂省略（连分词都不做）。分词 = 去标点、小写、空格切分（search/retrieval.py:28-34）。
+一句人话：分词后拼一个 tsquery 文本作为一个绑定参数传进 SQL，native 后端用 `ts_rank_cd` 打分、`@@` 当匹配门；四种扩展后端各换一套算子，但语句骨架相同。**门控**（recall.py:96-97）：`tokens = tokenize_query(query_text) if enable_text_search else []`；tokens 为空 → 整臂省略（连分词都不做）。分词 = 去标点、小写、空格切分（search/retrieval.py:28-34）。
 
-**tsquery 的参数化构造**：词项不逐个绑定，而是 Python 端拼成一个文本绑定 $4（参数布局 recall.py:127-137：$1=emb $2=bank **$3=limit** **$4=bm25_text** $5=tags $6+groups）。`build_bm25_query_text`（search/bm25_term_selection.py:121-173）决定 $4：native→`" | ".join(tokens)`（postgresql.py:465-478），SQL 端 `to_tsquery('english', $4)` 解析，language 内联但经 HindsightConfig 验证为 PG 标识符（postgresql.py:427-428）。**词项过多**（> `bm25_max_query_terms` 且 `bm25_selective_terms` 开，仅 native+PG）：按 pg_stats 的 IDF 选词——`_TOKEN_DF_SQL`（bm25_term_selection.py:56-79）从 `pg_stats.most_common_elems`（schemaname=$2, tablename=$3, attname='search_vector'）读每词素文档频率，保留 df 最低的 N 个（最挑剔、最高信号词）；动机：native `ts_rank_cd` 无 IDF 且不被索引支撑，宽 OR 查询会让 `@@` 命中过大并全量打分（+60s 生产挂起，:1-28）。
+**tsquery 的参数化构造**：词项不逐个绑定，而是 Python 端拼成一个文本绑定 $4（参数布局 recall.py:128-138：$1=emb $2=bank **$3=limit** **$4=bm25_text** $5=tags $6+groups）。`build_bm25_query_text`（search/bm25_term_selection.py:121-173）决定 $4：native→`" | ".join(tokens)`（postgresql.py:465-478），SQL 端 `to_tsquery('english', $4)` 解析，language 内联但经 HindsightConfig 验证为 PG 标识符（postgresql.py:427-428）。**词项过多**（> `bm25_max_query_terms` 且 `bm25_selective_terms` 开，仅 native+PG）：按 pg_stats 的 IDF 选词——`_TOKEN_DF_SQL`（bm25_term_selection.py:56-79）从 `pg_stats.most_common_elems`（schemaname=$2, tablename=$3, attname='search_vector'）读每词素文档频率，保留 df 最低的 N 个（最挑剔、最高信号词）；动机：native `ts_rank_cd` 无 IDF 且不被索引支撑，宽 OR 查询会让 `@@` 命中过大并全量打分（+60s 生产挂起，:1-28）。
 
 **native 臂 SQL**（sql/postgresql.py:426-447）：
 
@@ -199,14 +201,14 @@ flowchart TB
 - 打分函数 `ts_rank_cd`（压缩覆盖率变体）；`@@` 是 GIN 索引可服务的匹配门（`idx_memory_units_text_search USING gin(search_vector)`，alembic 5a366d414dce:399-402；vchord/pg_search/pg_textsearch 各自 `USING bm25(...)` DDL :374-396）。
 - **分数下限**（sql/base.py:10-26 `bm25_score_gate`）：默认 0.0 时门退化为结构性的 `> 0`（native 有 `@@` 已是真匹配门，postgresql.py:449-453）；请求给了 `min_scores.keyword` 时外套 `(SELECT * FROM <arm> AS bm25_arm_{i} WHERE bm25_score >= floor)`（postgresql.py:463）——**不能放内层 WHERE**：pgroonga/pg_search 的分数只在 target list 有效、native/ts_rank_cd 与 pg_textsearch 的 `<@>` 在 WHERE 重算会双倍计算并丢索引序（:455-462）。
 - **其余扩展形态**（postgresql.py:377-425）：vchord `-(search_vector <&> to_bm25query('idx_memory_units_text_search', tokenize($4,'llmlingua2')))`（<&> 返回负分数，取反 + `> 0` 门）；pgroonga `pgroonga_score(tableoid,ctid)` 打分 + `(text||' '||context||' '||text_signals) &@~ (pgroonga_tokenize OR 串)`（:395-412）；pg_search `id @@@ paradedb.boolean(should => ARRAY(...term...))`（`context` 刻意不进 should，#4313）；pg_textsearch `-(text <@> to_bm25query($4, 'idx_memory_units_text_search'))` ASC（:392-393）。
-- **LIMIT 参数化差异**：BM25 臂用 `$3` 绑定，语义臂内联字面量——一个语句里两种风格并存（recall.py:131 注释：$3 只在含 BM25 臂时被引用）。
+- **LIMIT 参数化差异**：BM25 臂用 `$3` 绑定，语义臂内联字面量——一个语句里两种风格并存（recall.py:132 注释：$3 只在含 BM25 臂时被引用）。
 - **Oracle Text 形态**（sql/oracle.py:257-298）：`CONTAINS(text, :4, label) {gate} / SCORE(label) AS bm25_score / ORDER BY SCORE(label) DESC / FETCH FIRST :3 ROWS ONLY`，每臂唯一 label=10+arm_index 避免 UNION 内冲突；$4 由 `OracleDialect.prepare_bm25_text`（oracle.py:300-323）拼成含特殊字符过滤、保留字 `{}` 转义的 `" OR "` 串。CONTAINS 失败（DRG-10599/ORA-30600/ORA-29902，CTXSYS 索引未同步）→ 整句回退 semantic-only，且因 Oracle 要求每个 bind 都被引用（DPY-4008）须按无 BM25 布局重建参数（recall.py:234-280）。
 
 ### 2.4 两臂 UNION ALL 拼接与输出行形状
 
 一句人话：两臂拼成一条 SQL 后**直接**发给 PG——外层零包裹、零再排序、零限幅；靠三个粘合列对齐，行回来后按 `source` 列分流。
 
-`query = "\nUNION ALL\n".join(arms)` 后直接 `conn.fetch`（pg/recall.py:221-233）。对齐靠三个粘合列：
+`query = "\nUNION ALL\n".join(arms)` 后直接 `conn.fetch`（pg/recall.py:222-232）。对齐靠三个粘合列：
 
 | 列 | semantic 臂 | bm25 臂 |
 |---|---|---|
@@ -214,11 +216,11 @@ flowchart TB
 | bm25_score | `NULL::float` | 分数表达式 |
 | source | `'semantic'` | `'bm25'` |
 
-`NULL::float` 显式定型保证 UNION 列类型一致（postgresql.py:337/435）。**输出行形状** = 13 个投影列（recall.py:115-118，含 metadata）+ similarity + bm25_score + source。Python 端 `row.pop("source")` 分流（recall.py:284-294）：semantic 行按到达序收进 `semantic_candidates`（:291 有 `len < semantic_fetch` 前缀上限，随后 ：297 截 `[:limit]`——SQL LIMIT 已保证，此处是双保险）；bm25 行直接入列。graph_seeds 从同一批稠密候选取 `similarity >= graph_seed_threshold` 的前 20 个（:298-303），避免每 fact_type 重复一次 ANN 查询。注意（X1 修正）：图臂 CTE 的投影 `MEMORY_UNIT_COLUMNS`（db/ops.py:45-58）**不含 metadata**，与稠密/BM25 臂 cols（含 metadata，recall.py:115-118）列集不一致——两处由不同消费方读取。
+`NULL::float` 显式定型保证 UNION 列类型一致（postgresql.py:337/435）。**输出行形状** = 13 个投影列（recall.py:116-119，含 metadata）+ similarity + bm25_score + source。Python 端 `row.pop("source")` 分流（recall.py:285-297）：semantic 行按到达序收进 `semantic_candidates`（:292 有 `len < semantic_fetch` 前缀上限，随后 ：298 截 `[:limit]`——SQL LIMIT 已保证，此处是双保险）；bm25 行直接入列。graph_seeds 从同一批稠密候选取 `similarity >= graph_seed_threshold` 的前 20 个（:298-304），避免每 fact_type 重复一次 ANN 查询。注意（X1 修正）：图臂 CTE 的投影 `MEMORY_UNIT_COLUMNS`（db/ops.py:45-58）**不含 metadata**，与稠密/BM25 臂 cols（含 metadata，recall.py:116-119）列集不一致——两处由不同消费方读取。
 
-### 2.5 temporal 臂（pg/recall.py:308-715）
+### 2.5 temporal 臂（pg/recall.py:310-701）
 
-一句人话：先用"时间窗重叠 + 相似度达标"选一个 60 行的池，Python 把池按时间分桶挑出 10 个入口点，再沿时间/因果边在 SQL 里一跳一跳扩散——分数全在 Python 算，SQL 只搬运原始权重。调参常量（recall.py:308-317）：`_TEMPORAL_POOL_SIZE=60`、`_TEMPORAL_ENTRY_POINTS=10`、`_TEMPORAL_COVERAGE_BUCKETS=8`；`_CAUSAL_BOOST = {"causes":2.0,"caused_by":2.0,"enables":1.5,"prevents":1.5}`、`_TEMPORAL_DECAY=0.7`。三个时间字段均为 `TIMESTAMPTZ`；temporal 入口把 naive 输入统一置 UTC（recall.py:408-412）。**① 入口点查询**（recall.py:477-503，每 fact_type 一臂 UNION ALL，参数 $1=emb $2=bank $3=start $4=end $5=threshold $6=tags）：
+一句人话：先用"时间窗重叠 + 相似度达标"选一个 60 行的池，Python 把池按时间分桶挑出 10 个入口点，再沿时间/因果边在 SQL 里一跳一跳扩散——分数全在 Python 算，SQL 只搬运原始权重。调参常量（recall.py:310-318）：`_TEMPORAL_POOL_SIZE=60`、`_TEMPORAL_ENTRY_POINTS=10`、`_TEMPORAL_COVERAGE_BUCKETS=8`；`_CAUSAL_BOOST = {"causes":2.0,"caused_by":2.0,"enables":1.5,"prevents":1.5}`、`_TEMPORAL_DECAY=0.7`。三个时间字段均为 `TIMESTAMPTZ`；temporal 入口把 naive 输入统一置 UTC（recall.py:416-420）。**① 入口点查询**（recall.py:484-508，每 fact_type 一臂 UNION ALL，参数 $1=emb $2=bank $3=start $4=end $5=threshold $6=tags）：
 
 ```sql
 (SELECT ..., fact_type, proof_count, document_id, chunk_id, tags, metadata,
@@ -236,11 +238,11 @@ flowchart TB
  LIMIT 60)                                                     -- _TEMPORAL_POOL_SIZE 内联
 ```
 
-- **时间窗如何变成 WHERE**：四种日期形状分别判定——双端区间按 overlap（start≤$4 AND end≥$3），单点按 BETWEEN。fact_type 仍内联字面量以避开 `unnest`/LATERAL（Oracle 无等价，recall.py:415-418/467-471）。**选池策略**（recall.py:455-463 注释）：旧版按 `COALESCE(occurred_start, mentioned_at, occurred_end)` 取最近 50，在密集同日期 bank 上退化为全表扫+spill sort（30s+，660k 行实测）；现按相似度 ANN 取 60 行池。**`event_date` 闭环**（X1 修正）：入口 SQL 只投影 event_date、谓词全在 occurred/mentioned 上；`event_date` 仅为兼容保留、不进任何时间谓词（aa2b3c4d5e6f:31；models.py:132-134）。
+- **时间窗如何变成 WHERE**：四种日期形状分别判定——双端区间按 overlap（start≤$4 AND end≥$3），单点按 BETWEEN。fact_type 仍内联字面量以避开 `unnest`/LATERAL（Oracle 无等价，recall.py:422-425/462-471）。**选池策略**（recall.py:453-471 注释）：旧版按 `COALESCE(occurred_start, mentioned_at, occurred_end)` 取最近 50，在密集同日期 bank 上退化为全表扫+spill sort（30s+，660k 行实测）；现按相似度 ANN 取 60 行池。**`event_date` 闭环**（X1 修正）：入口 SQL 只投影 event_date、谓词全在 occurred/mentioned 上；`event_date` 仅为兼容保留、不进任何时间谓词（aa2b3c4d5e6f:31；models.py:138-140）。
 
-**② 池→入口点**：`_select_with_temporal_coverage`（recall.py:325-371）纯 Python——窗口分 8 桶，按相似度降序轮转取（每桶最优→次优……），每个有数据的时段切片先于任何切片出第二行；窗口退化（全部同日期）坍缩为纯相似度序。产出每 fact_type ≤10 个入口点。
+**② 池→入口点**：`_select_with_temporal_coverage`（recall.py:335-378）纯 Python——窗口分 8 桶，按相似度降序轮转取（每桶最优→次优……），每个有数据的时段切片先于任何切片出第二行；窗口退化（全部同日期）坍缩为纯相似度序。产出每 fact_type ≤10 个入口点。
 
-**③ 扩散 SQL**（recall.py:629-654，BFS 每批 batch_ids≤20，参数 $1=emb $2=batch_ids $3=fact_type $4=threshold $5=per_source_limit $6=bank $7=tags）：
+**③ 扩散 SQL**（recall.py:626-651，BFS 每批 batch_ids≤20，参数 $1=emb $2=batch_ids $3=fact_type $4=threshold $5=per_source_limit $6=bank $7=tags）：
 
 ```sql
 SELECT src.from_unit_id, mu.id, mu.text, ..., mu.proof_count,
@@ -262,16 +264,17 @@ WHERE mu.bank_id = $6 AND mu.fact_type = $3 AND mu.embedding IS NOT NULL
   <tags@$7 with "mu." alias> <groups> <window clause "mu">
 ```
 
-- **JOIN 形态**：`unnest` 展开批内源 id → `CROSS JOIN LATERAL` 每源取权重 top-10 邻居（注释 ：584-587：让 planner 用 `(from_unit_id, link_type, weight DESC)` 复合索引提前终止）→ JOIN 回 memory_units 取行。
-- **`_CAUSAL_BOOST`/`_TEMPORAL_DECAY` 不在 SQL**：SQL 只取 raw `weight`/`link_type`；传播分在 Python 闭包 `propagated_temporal`（recall.py:539-548）= 父节点时间分 × link.weight × boost × 0.7。窗口/分数均单跳传播，无 SQL 内递归 CTE。
-- **扩散重复施加的是 updated_at 窗，不是 occurred/mentioned 时间窗**：`spreading_window = UpdatedWindow(created_after/before)`（recall.py:601-605）在扩散 SQL 以 `mu.` 别名重复（:651），因为扩散会走出入口点把窗口外（按 updated_at）的邻居拉进来（:598-600）；occurred/mentioned 时间窗**不**约束邻居——in-window 入口点的 out-of-window 时间邻居是合法结果。`UpdatedWindow.clause` 渲染 `AND {alias}.updated_at > $n / < $m`（db/ops.py:307-316）。
-- **时间近似优先级**：occurred 中点 > occurred_start > occurred_end > mentioned_at（recall.py:557-564，扩散侧同 :680-687）；全无则 proximity=0.5/0.3。
-- **多路径收敛与预算**：同一目标可经多条边到达，Python 端 `best_by_target` 按 propagated 分留最强路径（recall.py:663-674）；结果分 = `max(自身时间邻近度, 传播分)`（:699）；继续扩散条件 `combined_temporal > 0.2`（:706）；预算 `budget_remaining = budget − len(entry_points)`（:582），迭代上限 5（:589）。
-- Oracle：`supports_unnest` 检查（recall.py:611），无 unnest → 跳过扩散、只返回入口点。与语义/BM25 臂共用**同一条连接、串行**（postgres.py:177-211）；图臂随后另开连接并行。
+- **JOIN 形态**：`unnest` 展开批内源 id → `CROSS JOIN LATERAL` 每源取权重 top-10 邻居（注释 ：581-584：让 planner 用 `(from_unit_id, link_type, weight DESC)` 复合索引提前终止）→ JOIN 回 memory_units 取行。
+- **`_CAUSAL_BOOST`/`_TEMPORAL_DECAY` 不在 SQL**：SQL 只取 raw `weight`/`link_type`；传播分在 Python 闭包 `propagated_temporal`（recall.py:547-556）= 父节点时间分 × link.weight × boost × 0.7。窗口/分数均单跳传播，无 SQL 内递归 CTE。
+- **扩散重复施加的是 updated_at 窗，不是 occurred/mentioned 时间窗**：`spreading_window = UpdatedWindow(created_after/before)`（recall.py:598-602）在扩散 SQL 以 `mu.` 别名重复（:648），因为扩散会走出入口点把窗口外（按 updated_at）的邻居拉进来（:593-597）；occurred/mentioned 时间窗**不**约束邻居——in-window 入口点的 out-of-window 时间邻居是合法结果。`UpdatedWindow.clause` 渲染 `AND {alias}.updated_at > $n / < $m`（db/ops.py:307-316）。
+- **时间近似优先级**：判定已抽到 `_best_date`（recall.py:326-332）——occurs 区间两端都有则取中点，否则取有的那一端（start 优先于 end），再否则 `mentioned_at`。入口点与邻居都调它（:564、:676），拿不到日期时 proximity 分别取 0.5（:570）与 0.3（:683）。
+- **多路径收敛与预算**：同一目标可经多条边到达，Python 端 `best_by_target` 按 propagated 分留最强路径（recall.py:660-671）；结果分 = `max(自身时间邻近度, 传播分)`（:685）；继续扩散条件 `combined_temporal > 0.2`（:692）；预算 `budget_remaining = budget − len(entry_points)`（:579），迭代上限 5（:586）。
+- **评分用的是单个时间点，且占位日期算未知（1.1.0）**：入口点与邻居的时间都经 `_best_date`（recall.py:326-332）取一个点——occurs 区间取中点，否则取任一端点，再否则 `mentioned_at`；此前这段 if/elif 在入口点（:564）与邻居（:676）各写了一遍。两个取值函数都会先过 `finite_utc`（`engine/stored_dates.py:19-27`）：year-1 / year-9999 这类占位值（模型写"一直如此/仍在进行"，PG 存成 `±infinity`，asyncpg 读回来不带时区）一律当 None，于是分桶落 0 桶、入口点 proximity 取 0.5、邻居取 0.3，不再参与时区混合的日期算术（#5820/#5828；分桶侧的 `_coalesce_date` 在 :321-323）。
+- Oracle：`supports_unnest` 检查（recall.py:608），无 unnest → 跳过扩散、只返回入口点。与语义/BM25 臂共用**同一条连接、串行**（postgres.py:179-212）；图臂随后另开连接并行。
 
 ### 2.6 graph 臂（link_expansion.py）
 
-一句人话：种子尽量复用稠密臂结果；每轮一条 CTE 查询同时算三路信号——共享实体数（unit_entities）、语义 kNN 边、因果边（memory_links），三信号在 Python 相加成 activation。**全程不 JOIN `entities` 表**（X1 裁决：检索链路读 unit_entities+memory_links+memory_units，entities 只在 retain 侧）。**种子取得**：优先复用稠密臂结果——`preselected_semantic_seeds = semantic_bm25[ft].graph_seeds`（postgres.py:235）；为 None（语义臂 SQL 阈值覆盖不到图阈值）时自查 `_find_semantic_seeds`（link_expansion.py:170-190, 51-111）：
+一句人话：种子尽量复用稠密臂结果；每轮一条 CTE 查询同时算三路信号——共享实体数（unit_entities）、语义 kNN 边、因果边（memory_links），三信号在 Python 相加成 activation。**全程不 JOIN `entities` 表**（X1 裁决：检索链路读 unit_entities+memory_links+memory_units，entities 只在 retain 侧）。**种子取得**：优先复用稠密臂结果——`preselected_semantic_seeds = semantic_bm25[ft].graph_seeds`（postgres.py:236）；为 None（语义臂 SQL 阈值覆盖不到图阈值）时自查 `_find_semantic_seeds`（link_expansion.py:170-190, 51-111）：
 
 ```sql
 SELECT id, text, ..., fact_type, document_id, chunk_id, tags, proof_count,
@@ -280,25 +283,27 @@ FROM memory_units
 WHERE bank_id = $2 AND embedding IS NOT NULL AND fact_type = $3
   AND (1 - (embedding <=> $1::vector)) >= $4            -- config.graph_seed_min_similarity
   {tags_clause} {groups_clause} {updated_range_clause}  -- $6=tags、$7 起 groups、其后 updated_at 区间（link_expansion.py:103-105）
-ORDER BY embedding <=> $1::vector LIMIT $5              -- GRAPH_SEED_LIMIT=20 (memories/base.py:796)
+ORDER BY embedding <=> $1::vector LIMIT $5              -- GRAPH_SEED_LIMIT=20 (memories/base.py:800)
 ```
 
 注意自查形态与稠密臂不同：`fact_type` 参数化（$3）而非内联；三个可选子句（tags/groups/updated_range）齐全（X1 修正补全）。seed_ids 去重（:203）。
 
 **非 observation：`_expand_combined`** 单轮 CTE 查询（link_expansion.py:336-344，params [seed_ids, fact_type, budget, *window]）：
 
-- **entity CTE**（ops_postgresql.py:980-1013）：`seed_entities AS (SELECT DISTINCT ue.entity_id FROM unit_entities ue WHERE ue.unit_id = ANY($1::uuid[]))` → 每 entity 一条 `CROSS JOIN LATERAL`：`ue_target.entity_id = se.entity_id AND ue_target.unit_id != ALL($1::uuid[]) AND EXISTS(SELECT 1 FROM mu_target WHERE mu_target.id = ue_target.unit_id AND mu_target.fact_type = $2 <window>)`，`ORDER BY ue_target.unit_id DESC LIMIT {per_entity_limit}`（先过滤后限幅，注释 ：996-998——窗口外/异类型候选不得消耗实体配额）→ `JOIN mu GROUP BY mu.id`，`COUNT(DISTINCT se.entity_id)::float AS score`（共享实体数），`ORDER BY score DESC LIMIT $3`。索引 `idx_unit_entities_entity_unit (entity_id, unit_id)`（link_expansion.py:317-319）。
-- **semantic CTE**（ops_postgresql.py:1024-1055）：双向 UNION ALL——`ml.from_unit_id = ANY($1) AND ml.link_type='semantic' JOIN mu ON mu.id = ml.to_unit_id` ∪ `ml.to_unit_id = ANY($1) JOIN mu ON mu.id = ml.from_unit_id`（kNN 图非对称，需双向查），均带 `mu.fact_type = $2 AND mu.id != ALL($1)`，外层 `GROUP BY + MAX(weight) AS score ORDER BY score DESC LIMIT $3`。
-- **causal CTE**（:1056-1069）：`DISTINCT ON (mu.id)`（PG 专有）保留每目标最大权重边，`ml.link_type IN ('causes','caused_by','enables','prevents')`，`ORDER BY mu.id, ml.weight DESC LIMIT $3`。
-- 超时回退：`asyncio.wait_for(config.link_expansion_timeout)` 失败 → 只跑 semantic+causal（drop entity 臂，fallback LIMIT $3，link_expansion.py:349-365）。
+- **entity CTE**（ops_postgresql.py:982-1015）：`seed_entities AS (SELECT DISTINCT ue.entity_id FROM unit_entities ue WHERE ue.unit_id = ANY($1::uuid[]))` → 每 entity 一条 `CROSS JOIN LATERAL`：`ue_target.entity_id = se.entity_id AND ue_target.unit_id != ALL($1::uuid[]) AND EXISTS(SELECT 1 FROM mu_target WHERE mu_target.id = ue_target.unit_id AND mu_target.fact_type = $2 <window>)`，`ORDER BY ue_target.unit_id DESC LIMIT {per_entity_limit}`（先过滤后限幅，注释 ：998-1000——窗口外/异类型候选不得消耗实体配额）→ `JOIN mu GROUP BY mu.id`，`COUNT(DISTINCT se.entity_id)::float AS score`（共享实体数），`ORDER BY score DESC LIMIT $3`。索引 `idx_unit_entities_entity_unit (entity_id, unit_id)`（link_expansion.py:317-319）。
+- **semantic CTE**（ops_postgresql.py:1023-1055）：双向 UNION ALL——`ml.from_unit_id = ANY($1) AND ml.link_type='semantic' JOIN mu ON mu.id = ml.to_unit_id` ∪ `ml.to_unit_id = ANY($1) JOIN mu ON mu.id = ml.from_unit_id`（kNN 图非对称，需双向查），均带 `mu.fact_type = $2 AND mu.id != ALL($1)`，外层 `GROUP BY + MAX(weight) AS score ORDER BY score DESC LIMIT $3`。
+- **causal CTE**（:1058-1071）：`DISTINCT ON (mu.id)`（PG 专有）保留每目标最大权重边，`ml.link_type IN ('causes','caused_by','enables','prevents')`，`ORDER BY mu.id, ml.weight DESC LIMIT $3`。
+- 超时回退：`asyncio.wait_for(config.link_expansion_timeout)` 失败 → 只跑 semantic+causal（drop entity 臂，fallback LIMIT $3，link_expansion.py:349-366）。
 
-**三信号合成在 Python**（link_expansion.py:233-268）：entity 分 = `math.tanh(row["score"] * 0.5)`（1 实体→0.46、2→0.76、3→0.91、4→0.96，自然饱和）；semantic 分 = raw `weight`（MAX）；causal 分 = raw `weight`（无 +1.0 boost——模块 docstring :16 写 "Score = weight + 1.0" 与实现 ：257-260 不符，见 §6.2）；总 `activation = entity + semantic + causal ∈ [0,3]`，排序取 `budget`。"权重"全部来自 `memory_links.weight` 单表，无独立权重表。
+**三信号合成在 Python**（link_expansion.py:245-278）：entity 分 = `math.tanh(row["score"] * 0.5)`（1 实体→0.46、2→0.76、3→0.91、4→0.96，自然饱和）；semantic 分 = raw `weight`（MAX）；causal 分 = raw `weight`（无 +1.0 boost——模块 docstring :16 写 "Score = weight + 1.0" 与实现 ：257-259 不符，见 §6.2）；总 `activation = entity + semantic + causal ∈ [0,3]`，排序取 `budget`。"权重"全部来自 `memory_links.weight` 单表，无独立权重表。
 
-**observation 特殊遍历**（ops_postgresql.py:1071-1262，一条查询三臂 UNION ALL :1247-1251）：`seed_sources AS (SELECT DISTINCT unnest(source_memory_ids) FROM memory_units WHERE id = ANY($1::uuid[]) AND source_memory_ids IS NOT NULL)`（数组 unnest）→ `source_entities`（JOIN unit_entities）→ `connected_sources`（`row_number() OVER (PARTITION BY entity_id ORDER BY unit_id DESC) <= per_entity_limit` + 排除 seed_sources；用 row_number 而非 LATERAL+LIMIT 是为让列统计可追溯、估行真实——#3510，:1099-1111）→ `candidate_ids`（每源单元素 `m.source_memory_ids @> ARRAY[cs.source_id]` 探 GIN + `OFFSET 0` 阻止谓词下推，#4715，:1122-1133）→ `candidates`（fact_type='observation' 硬编码）→ `scored`（`CROSS JOIN LATERAL unnest(c.source_memory_ids)` hash JOIN 后 `COUNT(DISTINCT cs.source_id)`，set-wise 打分替代逐行相关子查询，#3085，:1088-1097）→ `observation_entity_expanded ... LIMIT $2`，semantic/causal 臂同上但 fact_type 硬编码 'observation'。PG 侧读 `memory_units.source_memory_ids`；`observation_sources` 结对表仅 Oracle（§1.7）。
+**1.1.0 没有改动图臂的任何 SQL**（`link_expansion.py` 零差异，`ops_postgresql.py` 的改动只在 `pg_search_vector_expr` 与 consolidation 任务取列）。顺带澄清一个容易误挂的常量：`GRAPH_MAX_EDGES = 10_000`（`memories/base.py:807`，#5703）属于**图视图读取**（`pg/graph.py` 的 `graph_direct_links` 等），不是 recall 的图臂；recall 图臂的闸门只有 `budget` 与 `link_expansion_timeout`。
+
+**observation 特殊遍历**（ops_postgresql.py:1073-1264，一条查询三臂 UNION ALL :1249-1253）：`seed_sources AS (SELECT DISTINCT unnest(source_memory_ids) FROM memory_units WHERE id = ANY($1::uuid[]) AND source_memory_ids IS NOT NULL)`（数组 unnest）→ `source_entities`（JOIN unit_entities）→ `connected_sources`（`row_number() OVER (PARTITION BY entity_id ORDER BY unit_id DESC) <= per_entity_limit` + 排除 seed_sources；用 row_number 而非 LATERAL+LIMIT 是为让列统计可追溯、估行真实——#3510，:1157-1172，窗口函数在 :1162-1165）→ `candidate_ids`（每源单元素 `m.source_memory_ids @> ARRAY[cs.source_id]` 探 GIN + `OFFSET 0` 阻止谓词下推，#4715，:1174-1182）→ `candidates`（fact_type='observation' 硬编码）→ `scored`（`CROSS JOIN LATERAL unnest(c.source_memory_ids)` hash JOIN 后 `COUNT(DISTINCT cs.source_id)`，set-wise 打分替代逐行相关子查询，#3085，:1194-1200）→ `observation_entity_expanded ... LIMIT $2`，semantic/causal 臂同上但 fact_type 硬编码 'observation'。PG 侧读 `memory_units.source_memory_ids`；`observation_sources` 结对表仅 Oracle（§1.7）。
 
 ### 2.7 方言差异小结
 
-一句人话：四路的 SQL 大多在**构造期**就按方言各写一份（arm builders / CTE builders），运行期改写层只兜住散落的手写片段。构造期分派：`dialect = create_sql_dialect(conn.backend_type)`（pg/recall.py:125，测试用裸 asyncpg 缺属性时默认 postgresql）。**Oracle 的非 observation 图 CTE**（ops_oracle.py:699-805）：不能 GROUP BY CLOB → `entity_scores`/`sem_scores` 子查询只算 id+score 再 JOIN 回全列；无 DISTINCT ON → causal 用 `ROW_NUMBER() OVER (PARTITION BY mu.id ORDER BY ml.weight DESC) WHERE rn_=1`。**observation junction 表**：Oracle `SELECT DISTINCT os.source_id FROM observation_sources os WHERE os.observation_id = ANY($1::uuid[])`（ops_oracle.py:850-876）。执行期改写 `_rewrite_pg_to_oracle`（db/oracle.py:343+）详见 §6.1；temporal 扩散的 `unnest($2::uuid[])` 无 Oracle 等价，直接跳过该步（recall.py:607-611）。
+一句人话：四路的 SQL 大多在**构造期**就按方言各写一份（arm builders / CTE builders），运行期改写层只兜住散落的手写片段。构造期分派：`dialect = create_sql_dialect(conn.backend_type)`（pg/recall.py:126，测试用裸 asyncpg 缺属性时默认 postgresql）。**Oracle 的非 observation 图 CTE**（ops_oracle.py:699-806）：不能 GROUP BY CLOB → `entity_scores`/`sem_scores` 子查询只算 id+score 再 JOIN 回全列；无 DISTINCT ON → causal 用 `ROW_NUMBER() OVER (PARTITION BY mu.id ORDER BY ml.weight DESC) WHERE rn_=1`。**observation junction 表**：Oracle `SELECT DISTINCT os.source_id FROM observation_sources os WHERE os.observation_id = ANY($1::uuid[])`（ops_oracle.py:850-876）。执行期改写 `_rewrite_pg_to_oracle`（db/oracle.py:343+）详见 §6.1；temporal 扩散的 `unnest($2::uuid[])` 无 Oracle 等价，直接跳过该步（recall.py:604-607）。
 
 ---
 
@@ -310,19 +315,19 @@ ORDER BY embedding <=> $1::vector LIMIT $5              -- GRAPH_SEED_LIMIT=20 (
 
 一句人话：SQL 返回的行先变成统一的 `RetrievalResult`（每臂填自己的分数），引擎把所有 fact_type 的四臂各拼成一个大列表、各按自己的分数排好——RRF 只看名次，这一步保证名次公平。**类型**：`search/types.py:47-131`。`from_db_row`（:110-131）逐字段搬运：id/text/fact_type/context/日期四字段/document_id/chunk_id/tags/metadata/proof_count + `similarity/bm25_score/activation/temporal_score/temporal_proximity`。`entity_ids/source_memory_ids/attachment_ids`（:82/:93/:100）**不在** `from_db_row` 里——它们是"存储内联携带"字段，默认 None，默认存储后续用 `hydrate_results`/`entity_map_for_units` 补（§3.4 的水合位）。**各臂如何填分**：
 
-- semantic/bm25：`recall.py:282-294`，UNION 行按 `source` 列分流；`semantic_fetch = max(limit, GRAPH_SEED_LIMIT)`（:113；`GRAPH_SEED_LIMIT = 20`，base.py:796）——下限保护图臂种子。graph_seeds = `similarity >= graph_seed_min_similarity`（默认 0.3，config.py:1378）的前 20 条（:298-303）。
-- graph：`link_expansion.py:262-278`，三信号**相加**：`activation = tanh(实体数×0.5) + max(语义相似度) + max(因果链权重)` ∈ [0,3]（:263-266），降序取 `budget`（:268）；注释明言 activation 必须保留和分而非单信号，否则跨 fact-type 合并后的重排会与臂内序不一致（:274-278）。
-- temporal：`recall.py:550-577`。入口点的分数 = 该记忆自身时间点（occurred 区间中点等，优先级见下）离查询窗口中点的接近度：`temporal_proximity = 1 - min(days_from_mid/(total_days/2), 1)`（:570，无日期 → 0.5 :572）；`temporal_score = temporal_proximity`（:575-576）。扩散邻居：`combined = max(自身 proximity, 传播分)`（:699），传播分 = 父 temporal_score × 链权重 × 因果加成 × 每跳衰减 0.7（`_CAUSAL_BOOST` causes/caused_by=2.0、enables/prevents=1.5，:316-317；:546-548）；无日期邻居 proximity 取 0.3（:697）。
+- semantic/bm25：`recall.py:283-297`，UNION 行按 `source` 列分流；`semantic_fetch = max(limit, GRAPH_SEED_LIMIT)`（:114；`GRAPH_SEED_LIMIT = 20`，base.py:800）——下限保护图臂种子。graph_seeds = `similarity >= graph_seed_min_similarity`（默认 0.3，config.py:1422）的前 20 条（:298-304）。
+- graph：`link_expansion.py:245-278`，三信号**相加**：`activation = tanh(实体数×0.5) + max(语义相似度) + max(因果链权重)` ∈ [0,3]（:264-268），降序取 `budget`（:270）；注释明言 activation 必须保留和分而非单信号，否则跨 fact-type 合并后的重排会与臂内序不一致（:274-278）。
+- temporal：`recall.py:558-577`。入口点的分数 = 该记忆自身时间点（occurred 区间中点等，优先级见下）离查询窗口中点的接近度：`temporal_proximity = 1 - min(days_from_mid/(total_days/2), 1)`（:567，无日期 → 0.5 :570）；`temporal_score = temporal_proximity`（:574-575）。扩散邻居：`combined = max(自身 proximity, 传播分)`（:685），传播分 = 父 temporal_score × 链权重 × 因果加成 × 每跳衰减 0.7（`_CAUSAL_BOOST` causes/caused_by=2.0、enables/prevents=1.5，:317-318；:547-556）；无日期邻居 proximity 取 0.3（:683）。
 
-**汇合后统一重排**（me:9720-9727）：四臂分别按 `similarity` / `bm25_score` / `activation` / `temporal_score or 0` 降序——注释（:9719-9720）明言 RRF 只看名次不看原始分，这一步保证名次公平。
+**汇合后统一重排**（me:10097-10103）：四臂分别按 `similarity` / `bm25_score` / `activation` / `temporal_score or 0` 降序——注释（:10096-10097）明言 RRF 只看名次不看原始分，这一步保证名次公平。
 
 ### 3.2 cap_per_source（RRF 之前，默认关）
 
-一句人话：可选的"每臂最多向融合池贡献 N 条"，防单一臂（如返回数百弱候选的 VectorChord）塞满重排全局预算。配置 `recall_max_candidates_per_source`（config.py:3441，env :1101），**默认 0（关）**（config.py:1400）；生效点 me:9732-9741——在四臂各自重排**之后**、fusion **之前**，对 4 个列表分别套 `cap_per_source(list, cap)`（:9737-9741）并 debug 记录前后数量。实现 `fusion.py:8-26`：`if cap <= 0 or len(results) <= cap: return results`；否则 `results[:cap]`——**只切不排**，排序责任在调用方（docstring :13-15）。存储全包路径同样收 `per_source_cap`（me:9556）。
+一句人话：可选的"每臂最多向融合池贡献 N 条"，防单一臂（如返回数百弱候选的 VectorChord）塞满重排全局预算。配置 `recall_max_candidates_per_source`（config.py:3541，env :1141），**默认 0（关）**（config.py:1444）；生效点 me:10105-10114——在四臂各自重排**之后**、fusion **之前**，对 4 个列表分别套 `cap_per_source(list, cap)`（:10110-10114）并 debug 记录前后数量。实现 `fusion.py:8-26`：`if cap <= 0 or len(results) <= cap: return results`；否则 `results[:cap]`——**只切不排**，排序责任在调用方（docstring :13-15）。存储全包路径同样收 `per_source_cap`（me:9927）。
 
 ### 3.3 RRF 融合（k=60）
 
-一句人话：文档每在一条臂的榜单排第 r 名就加 1/(60+r)，多臂命中累加；融合产物 `MergedCandidate` 只携带名次记账，各臂原始分另存 `arm_scores`。`search/fusion.py:29-109 reciprocal_rank_fusion(result_lists, k: int = 60)`；调用点 me:9791-9806：`result_lists = [semantic, bm25, graph] (+ temporal if any)`；`reranking=="interleave"` 时换 `interleave_fusion`（fusion.py:112-176，consolidation 去重专用：RRF 会把"单臂第一、他臂缺席"的孪生 observation 均摊出局，轮询保证每臂头部有位，docstring :113-130）。
+一句人话：文档每在一条臂的榜单排第 r 名就加 1/(60+r)，多臂命中累加；融合产物 `MergedCandidate` 只携带名次记账，各臂原始分另存 `arm_scores`。`search/fusion.py:29-109 reciprocal_rank_fusion(result_lists, k: int = 60)`；调用点 me:10329-10336：`result_lists = [semantic, bm25, graph] (+ temporal if any)`；`reranking=="interleave"` 时换 `interleave_fusion`（fusion.py:112-176，consolidation 去重专用：RRF 会把"单臂第一、他臂缺席"的孪生 observation 均摊出局，轮询保证每臂头部有位，docstring :113-130）。
 
 - **公式**：`rrf_scores[doc_id] += 1.0 / (k + rank)`（fusion.py:85），k=60（:29），**名次从 1 起算**（`enumerate(results, start=1)`，:61）；同一 doc 每出现在一个臂就累加一次（:85 无条件）。
 - **首现行保留**：`if doc_id not in all_retrievals: all_retrievals[doc_id] = retrieval`（:76-77）——按列表顺序 semantic→bm25→graph→temporal（`source_names`，:56-59）**最先命中臂的原始行**胜出；该行只带那个臂自己的分数字段（这正是需要 arm_scores 单独记账的原因，:88-89 注释）。
@@ -333,25 +338,26 @@ ORDER BY embedding <=> $1::vector LIMIT $5              -- GRAPH_SEED_LIMIT=20 (
 
 一句人话：300 个候选上限只在新策略 boost 超限时才需要排序；正文到这一步才补齐；cross-encoder 输出的分数要么已是 [0,1] 直接透传、要么过 sigmoid，打不上的 0 分殿后。
 
-**reranking 模式解析**：请求级 `reranking` ∈ {cross_encoder(默认), rrf, interleave}（类型别名 `RecallReranking`，me:760）。银行级 `enable_reranking=False` 只把 `cross_encoder` 降级为 `rrf`，不碰显式的 rrf/interleave（`_resolve_reranking`，me:1684-1695——interleave 是 consolidation 去重的显式选择，不得覆盖）。并发上限 `recall_max_concurrent` 默认 32（config.py:1652）。
+**reranking 模式解析**：请求级 `reranking` ∈ {cross_encoder(默认), rrf, interleave}（类型别名 `RecallReranking`，me:786）。银行级 `enable_reranking=False` 只把 `cross_encoder` 降级为 `rrf`，不碰显式的 rrf/interleave（`_resolve_reranking`，me:1725-1736——interleave 是 consolidation 去重的显式选择，不得覆盖）。并发上限 `recall_max_concurrent` 默认 32（config.py:1705）。
 
-**预截断（trim）** me:10007-10046：`max_candidates = reranker_max_candidates`（预算解析 me:1664-1682：每档 `reranker_max_candidates_low/mid/high` 默认 0（config.py:1374-1376）→ 回落平值 `reranker_max_candidates` 默认 **300**（config.py:1372；ENV config.py:649））。`trim_merged_candidates`（recall_boost.py:195-212）：池未超限**原样返回、不排序、boost 不跑、rrf_score 保持 fusion 原值**（:208-209）；超限则按 `boosted_rrf_score` 降序取前 N（:210-212），切点记入 trace（me:10025-10046：kept/dropped/arm_composition）。**水合位**：trim 之后、任何读文本者之前——`hydrate_results`（me:10047-10051）：宽臂只传 id+分，payload 到此才取全（注释 ：10035-10046）。
+**预截断（trim）** me:10363-10391：`max_candidates = reranker_max_candidates`（预算解析 me:1707-1722：每档 `reranker_max_candidates_low/mid/high` 默认 0（config.py:1418-1420）→ 回落平值 `reranker_max_candidates` 默认 **300**（config.py:1416；ENV config.py:687））。`trim_merged_candidates`（recall_boost.py:195-212）：池未超限**原样返回、不排序、boost 不跑、rrf_score 保持 fusion 原值**（:208-209）；超限则按 `boosted_rrf_score` 降序取前 N（:210-212），切点记入 trace（me:10376-10410：kept/dropped/arm_composition）。**水合位**：trim 之后、任何读文本者之前——`hydrate_results`（me:10424-10426）：宽臂只传 id+分，payload 到此才取全（注释 ：10411-10423）。
 
 **CrossEncoderReranker.rerank**（reranking.py:373-521）：
 
-- **候选文本构造**（:399-431）：`doc_text = f"{context}: {text}"`；有 `occurred_start` 则前置 `[Date: June 5, 2022 (2022-06-05)]`（ISO + 可读两种格式）。**候选文本截断**：`max_tokens_per_candidate`（基类属性，cross_encoder.py:165；全局 env `HINDSIGHT_API_RERANKER_MAX_TOKENS_PER_CANDIDATE` 默认 None=不截，config.py:1598/:605）在 `CrossEncoderModel.predict` 统一执行（cross_encoder.py:167-180）。
-- **原始分归一**（:463-478）：全部分数已落在 [0,1] → **原样透传**（外部校准 API 如 Cohere/Jina，保留绝对置信度，注释 ：431-435）；否则 **sigmoid** `1/(1+np.exp(-x))`（本地 logit 模型）。
-- **失败/超时语义**：`RerankTimeoutError` 携带部分分数（cross_encoder.py:88-107）；未得分者 raw=norm=**0.0**（:488-492，注释：0.5 会溜过 min_reranker 阈值），已得分者按 CE 分降序在前、未得分者**保持 RRF 顺序**殿后（:507-510）。NaN → 0.0（:481-486）。
-- `prunes_candidates=True` 的后端（cross_encoder.py:160，默认 False）在 rerank 末尾剔除 `weight==0.0`（:511-521）。`served_provider` 从 contextvar 拷出（:408-429；cross_encoder.py:62-76），failover 链下是"本次实际服务者"而非共享游标——stage2 判定与 min_scores 拒绝都吃这个值。
+- **候选文本构造**（:406-430）：`doc_text = f"{context}: {text}"`；有 `occurred_start` 则前置 `[Date: June 5, 2022 (2022-06-05)]`（ISO + 可读两种格式）。**候选文本截断**：`max_tokens_per_candidate`（基类属性，cross_encoder.py:198；全局 env `HINDSIGHT_API_RERANKER_MAX_TOKENS_PER_CANDIDATE` 默认 None=不截，config.py:1651/:642）在 `CrossEncoderModel.predict` 统一执行（cross_encoder.py:205-227）。
+- **原始分归一**（:465-475）：全部分数已落在 [0,1] → **原样透传**（外部校准 API 如 Cohere/Jina，保留绝对置信度，注释 ：457-462）；否则 **sigmoid** `1/(1+np.exp(-x))`（本地 logit 模型）。
+- **失败/超时语义**：`RerankTimeoutError` 携带部分分数（cross_encoder.py:101-118）；未得分者 raw=norm=**0.0**（:490-494，注释：0.5 会溜过 min_reranker 阈值），已得分者按 CE 分降序在前、未得分者**保持 RRF 顺序**殿后（:507-509）。NaN → 0.0（:481-489）。
+- `prunes_candidates=True` 的后端（cross_encoder.py:193，默认 False）在 rerank 末尾剔除 `weight==0.0`（:511-522）。`served_provider` 从 contextvar 拷出（:437-451；cross_encoder.py:92-99），failover 链下是"本次实际服务者"而非共享游标——stage2 判定与 min_scores 拒绝都吃这个值。
+- **1.1.0 的 provider 面变化**（`onnx` 任意 ONNX 模型、Cohere 在飞上限 16、取消传播到进程内批次、TypeSafe 按 Jev 窗口减半重试、决策模型每候选 4000 token 上限且失败即抛）不改变本节的分叉逻辑——它们改的是"谁来打分、打分会不会半途而废"。唯一触及算术的是最后一条：失败请求以前会把那批候选以 0.0 塞进 `weight`，现在整次 recall 失败。详见 03 篇 3.6。
 
 ### 3.5 combined scoring：三重 boost 相乘
 
-一句人话：最终分不是 CE 分裸奔——它乘上"新鲜度、时间贴合度、证据数"三个温和的乘子，每个乘子最多偏离 1 正负 α/2，谁也压不过谁。**passthrough 种子**：`is_passthrough_reranker=True`（判定 `stage2_passthrough`：显式 `reranking=="rrf"` 或 `served_provider=="rrf"`，recall_boost.py:215-223；slim 部署的 `RRFPassthroughCrossEncoder` 恒返回 0.5，cross_encoder.py:1473-1512）时，CE 归一分由 RRF 名次重造：按 rrf_score 降序 `1.0 - 0.9*rank/(n-1)`，即 [1.0, 0.1]（reranking.py:252-263）——否则乘法 boost 成为唯一信号，终序退化为纯 recency 排序（注释 ：227-249）。
+一句人话：最终分不是 CE 分裸奔——它乘上"新鲜度、时间贴合度、证据数"三个温和的乘子，每个乘子最多偏离 1 正负 α/2，谁也压不过谁。**passthrough 种子**：`is_passthrough_reranker=True`（判定 `stage2_passthrough`：显式 `reranking=="rrf"` 或 `served_provider=="rrf"`，recall_boost.py:215-223；slim 部署的 `RRFPassthroughCrossEncoder` 恒返回 0.5，cross_encoder.py:1656-1693）时，CE 归一分由 RRF 名次重造：按 rrf_score 降序 `1.0 - 0.9*rank/(n-1)`，即 [1.0, 0.1]（reranking.py:252-263）——否则乘法 boost 成为唯一信号，终序退化为纯 recency 排序（注释 ：227-249）。
 
 **三个 boost 的输入**：
 
-- **recency**（reranking.py:273-281 → `_recency_for_unit` :125-171）：粗粒度日期（跨度恰为一个日历月/年，容差 86400s，`_spans_calendar_period` :102-120）按**周期末端**计龄且封顶 0.5（:150-161，#3893）；否则按有效时刻 `occurred_start or mentioned_at or occurred_end`（:165，与 SQL `COALESCE` 同序，recall.py:320-322），全空 → 0.5。**衰减曲线** `compute_recency_decay`（:58-80）：**linear（默认）= `max(0.1, min(1.0, 1.0 - days_ago/window))`**，window=365 天（:54，config.py:1410）；exponential = `0.5**(days_ago/90)`（半衰 90 天，:55）；none = 0.5；未来日期钳到最大新鲜度（:65-67）。参考时刻 = `question_date` 或 now（`_recall_scoring_now`，me:1697-1704）。
-- **temporal**：`sr.temporal = temporal_proximity or 0.5`（:284）——仅时间臂命中者非中性。**proof_boost**：`proof_norm = min(1.0, max(0.0, 0.5 + log(proof_count)/10.0))`（:290，仅 proof_count≥1 的 observation，:287-293）；proof_count=1 → 0.5（中性），150 → 钳到 1.0。
+- **recency**（reranking.py:273-281 → `_recency_for_unit` :125-173）：粗粒度日期（跨度恰为一个日历月/年，容差 86400s，`_spans_calendar_period` :102-120）按**周期末端**计龄且封顶 0.5（:150-159，#3893）；否则按有效时刻 `occurred_start or mentioned_at or occurred_end`（:165，与 SQL `COALESCE` 同序，recall.py:321-323），全空 → 0.5。**衰减曲线** `compute_recency_decay`（:58-80）：**linear（默认）= `max(0.1, min(1.0, 1.0 - days_ago/window))`**，window=365 天（:54，config.py:1454）；exponential = `0.5**(days_ago/90)`（半衰 90 天，:55）；none = 0.5；未来日期钳到最大新鲜度（:65-67）。参考时刻 = `question_date` 或 now（`_recall_scoring_now`，me:1742-1750）。
+- **temporal**：`sr.temporal = temporal_proximity or 0.5`（:284）——仅时间臂命中者非中性。**proof_boost**：`proof_norm = min(1.0, max(0.0, 0.5 + log(proof_count)/10.0))`（:290，仅 proof_count≥1 的 observation，:287-296）；proof_count=1 → 0.5（中性），150 → 钳到 1.0。
 
 **公式**（:302-306；α 常量 `_RECENCY_ALPHA=0.2 / _TEMPORAL_ALPHA=0.2 / _PROOF_COUNT_ALPHA=0.1`（:37-39），乘法、各贡献 ±α/2（:33-36 注释））：
 
@@ -363,13 +369,15 @@ combined_score    = CE_norm × recency_boost × temporal_boost × proof_count_bo
 weight            = combined_score
 ```
 
-`rrf_normalized` 强制 0.0 仅留 trace 连续性（:298-300）。interleave 模式**跳过整段**，`weight = rrf_score` 保序（me:10120-10128）。
+`rrf_normalized` 强制 0.0 仅留 trace 连续性（:298-300）。interleave 模式**跳过整段**，`weight = rrf_score` 保序（me:10498-10505）。**决策模型重排器同样跳过整段**（1.0.0 起）：`served_provider == "decision_model"` 时 `apply_combined_scoring` 一次都不调用，决策模型给的次序就是终序（me:10493-10496），所以本节公式对那条路径不适用、`RecallScores.reranker` 也是 null（§4.1）。
+
+**1.1.0 对这条链的影响都在上游**：重排器可能换成任意 ONNX 模型（分数仍是 logits，归一化分叉不变）、Cohere 加了在飞上限 16、TypeSafe 会按 Jev 的窗口把问题预算逐次减半、决策模型重排器给每个候选文本加 4000 token 上限并把"请求失败"从"排到最后"改成抛异常。最后一条直接改了分数语义：以前那批候选会以 0.0 进入本节公式（看起来像"模型认为无关"），现在整次 recall 失败。细节见 03 篇 3.6。
 
 ### 3.6 stage-1 / stage-2 策略 boost
 
 一句人话：`graph:high` 这类配置给被 boost 的臂加分——stage-1 在名次空间加 delta（只在候选池超 300 时当排序键用），stage-2 在最终 weight 上加法（temporal 臂全额不衰减）。
 
-配置：`HINDSIGHT_API_RECALL_STRATEGY_BOOSTS`（config.py:1109），默认空串（config.py:1404）；解析 `_parse_strategy_boosts`（config.py:1423-1452）：strategy ∈ `{semantic,bm25,graph,temporal}`（:1414）、level ∈ `{low,medium,high}`（:1418），缺省 level=medium（:1420），非法项告警跳过（降级为无 boost 而非报错，:1430-1440）。默认 **BOOST_LEVELS**（recall_boost.py:112-116）：
+配置：`HINDSIGHT_API_RECALL_STRATEGY_BOOSTS`（config.py:1149），默认空串（config.py:1448）；解析 `_parse_strategy_boosts`（config.py:1467-1496）：strategy ∈ `{semantic,bm25,graph,temporal}`（:1458）、level ∈ `{low,medium,high}`（:1462），缺省 level=medium（:1464），非法项告警跳过（降级为无 boost 而非报错，:1486-1496）。默认 **BOOST_LEVELS**（recall_boost.py:112-116）：
 
 | level | rank_divisor（stage-1） | additive（stage-2 rank1 上限） |
 |---|---|---|
@@ -379,7 +387,7 @@ weight            = combined_score
 
 - **stage-1（名次空间，截断前）** `boosted_rrf_score`（:127-151）：对候选出现过的每个被 boost 臂，`delta += 1/(k + rank/divisor) - 1/(k+rank)`，返回 `rrf_score + delta`。**仅**在 `trim_merged_candidates` 超限时作排序键（:210）；`rrf_score` 本身不回写（:206）。设计动机（模块 docstring :31-52）：score 空间乘权在 300-cap 窗口内（RRF 仅跨 1/61→1/360，5.9 倍——即名次本身最多带来约 6 倍分差）会被 `high=w7`（high 档的乘权 w7）压成字典序、boosted 臂独占 300 槽（#3956，recall@20 0.97→0.40）；名次空间下比较是 `r < divisor*s`，与池大小无关。
 - **stage-2（加法，重排后）** `additive_strategy_boost`（:154-184）：每命中臂贡献 `additive × divisor/(divisor + rank - 1)`——rank 1 拿满、深名次衰减（high 在 rank 9 衰半）；**`_FLAT_STAGE2_STRATEGIES = frozenset({"temporal"})`**（:124）全额不衰减——temporal 臂按日期接近度而非相关度排名，衰减会把 bump 交给窗口中点附近的记忆（#4494/#4939 注释 ：118-123）。多臂命中**相加、无联合上限**（:163）。
-- 应用点：me:9992-9997 `apply_post_rerank_boost`（recall_boost.py:226-245）——原地 `sr.weight += bump`；passthrough 时跳过、返回 "stage2=skipped_passthrough"（:241-242）。即 stage-2 位于 **combined scoring（:9980-9987）与最终 sort（:9998）之间**。rrf/interleave 显式模式下 stage-1 仍在 trim 中生效（trim 不分模式），stage-2 永不加（passthrough 判定 ：215-223；注释 me:9988-9991：RRF 种子权重上再加法会重排序，#4008）。
+- 应用点：me:10526-10530 `apply_post_rerank_boost`（recall_boost.py:226-245）——原地 `sr.weight += bump`；passthrough 时跳过、返回 "stage2=skipped_passthrough"（:241-242）。即 stage-2 位于 **combined scoring（:10509-10523）与最终 sort（:10531）之间**。rrf/interleave 显式模式下 stage-1 仍在 trim 中生效（trim 不分模式），stage-2 永不加（passthrough 判定 ：215-223；注释 me:10521-10524：RRF 种子权重上再加法会重排序，#4008）。
 
 ### 3.7 截断链全景（从臂内 LIMIT 到 token 预算）
 
@@ -387,48 +395,48 @@ weight            = combined_score
 
 | # | 环节 | 位置 | 配置/量 |
 |---|------|------|---------|
-| 1 | 查询入口截断（**截断非拒绝**；REST 400 已删，注释引 PR #298/#3134/#1875） | me:9030-9035（fn `_truncate_query_to_token_limit` :1717-1736） | `recall_max_query_tokens` 默认 500（config.py:1707，ENV :756；0=关） |
-| 2 | 每臂每 fact_type LIMIT = thinking_budget | recall.py（semantic :113/:291-297；BM25 `$3=limit` :131/:225）；graph budget=limit（postgres.py:229）；temporal 60 池/10 入口 | thinking_budget |
-| 3 | thinking_budget 解析 | me:1629-1662 | fixed（默认）：low=100/mid=300/high=1000；adaptive：`round(max_tokens×{0.025,0.075,0.25})` 夹 [20,2000] |
-| 4 | 每臂 cap（可选，默认关） | me:9732-9741 | `recall_max_candidates_per_source` 默认 0 |
-| 5 | RRF 池 → 重排候选预算 | me:10015-10030 | `reranker_max_candidates` 默认 300（每档覆盖默认 0 → 回落平值） |
-| 6 | CE prune（仅 prunes_candidates 后端） | reranking.py:485-496 | 分数恰 0.0 剔除 |
-| 7 | min_scores.reranker/.final 地板 | me:10177-10188 | 请求参数，无默认 |
-| 8 | prefer_observations 去重窗口 | me:10221-10285 | 仅看 `scored_results[:thinking_budget*2]`（:10230） |
-| 9 | **budget×2 截断**（Step 5） | me:10280-10282 | `top_scored = scored_results[:thinking_budget*2]` |
-| 10 | token 预算过滤（Step 6） | me:10412-10423 → fact_budget.py:43-87 | `max_tokens`（默认 4096；0=不返回 fact，#364） |
+| 1 | 查询入口截断（**截断非拒绝**；REST 400 已删，注释引 PR #298/#3134/#1875） | me:9387-9391（fn `_truncate_query_to_token_limit` :1762-1780） | `recall_max_query_tokens` 默认 500（config.py:1760，ENV :756；0=关） |
+| 2 | 每臂每 fact_type LIMIT = thinking_budget | recall.py（semantic :114/:292-298；BM25 `$3=limit` :132/:226）；graph budget=limit（postgres.py:229）；temporal 60 池/10 入口 | thinking_budget |
+| 3 | thinking_budget 解析 | me:1674-1704 | fixed（默认）：low=100/mid=300/high=1000；adaptive：`round(max_tokens×{0.025,0.075,0.25})` 夹 [20,2000] |
+| 4 | 每臂 cap（可选，默认关） | me:10105-10114 | `recall_max_candidates_per_source` 默认 0 |
+| 5 | RRF 池 → 重排候选预算 | me:10375-10391 | `reranker_max_candidates` 默认 300（每档覆盖默认 0 → 回落平值） |
+| 6 | CE prune（仅 prunes_candidates 后端） | reranking.py:511-522 | 分数恰 0.0 剔除 |
+| 7 | min_scores.reranker/.final 地板 | me:10555-10566 | 请求参数，无默认 |
+| 8 | prefer_observations 去重窗口 | me:10595-10656 | 仅看 `scored_results[:thinking_budget*2]`（:10604） |
+| 9 | **budget×2 截断**（Step 5） | me:10657-10659 | `top_scored = scored_results[:thinking_budget*2]` |
+| 10 | token 预算过滤（Step 6） | me:10789-10801 → fact_budget.py:43-87 | `max_tokens`（默认 4096；0=不返回 fact，#364） |
 
-Step 6 规则（fact_budget.py:61-87）：按名次顺序花预算（`fact_ids_ordered` 传入即 rank 序，me:10415-10423）；超预算的候选**跳过自身、不驱逐后面更短者**（:70-72）；全都不容下且 max_tokens>0 时**保底返回第 1 名整条**、超支照报（:76-85，"空答案读作『该库一无所知』"）。chunks 在 token 过滤**前**抓取、独立预算 `max_chunk_tokens` 默认 8192、最后一块可截断（me:10285-10400）；entities（:10590-10710）与 source_facts（:10507-10590）在其后、各有独立 token 预算。存储全包路径等价传 `truncate_to=thinking_budget*2`（:9566）。
+Step 6 规则（fact_budget.py:61-87）：按名次顺序花预算（`fact_ids_ordered` 传入即 rank 序，me:10792-10801）；超预算的候选**跳过自身、不驱逐后面更短者**（:70-72）；全都不容下且 max_tokens>0 时**保底返回第 1 名整条**、超支照报（:76-85，"空答案读作『该库一无所知』"）。chunks 在 token 过滤**前**抓取、独立预算 `max_chunk_tokens` 默认 8192、最后一块可截断（me:10661-10786）；entities（:10967-11090）与 source_facts（:10882-10965）在其后、各有独立 token 预算。存储全包路径等价传 `truncate_to=thinking_budget*2`（me:9940）。
 
 ### 3.8 终序键：`ScoredResult.weight` 的三段写入（X2 裁决）
 
 一句人话：最终排序键永远是 `weight`，但三种 reranking 模式下它走三条不同的写链——CE 路径三段写、interleave 只写一段、显式 rrf 绕过 CE 却仍走完整 combined scoring。
 
-**最终排序键 = `ScoredResult.weight`**，降序 sort 在 me:10156（stage-2 boost 之后、min_scores 过滤之前）。三条写链：
+**最终排序键 = `ScoredResult.weight`**，降序 sort 在 me:10531（stage-2 boost 之后、min_scores 过滤之前）。三条写链：
 
-1. **CE 路径（默认 cross_encoder）**：初值 = CE 归一分（reranking.py:500）→ `apply_combined_scoring` 覆写为 `combined_score`（:306）→ `apply_post_rerank_boost` 原地加 stage-2 加项（recall_boost.py:244）。
-2. **interleave 模式**：`weight = rrf_score`（me:10120-10128，即 interleave_fusion 写入的位置伪分数 `float(n - pos)`，fusion.py:170）——**跳过 combined scoring**，stage-2 也不加，全程保轮询序。
-3. **显式 rrf 模式**：me:10080-10090 构造的初值是 `weight=0.0`（:10088，:10090 只是按 rrf_score 排的构造序）→ 随后走 `elif scored_results:` 分支（:10131-10156）`apply_combined_scoring(is_passthrough=True)`——**CE 归一分由 RRF 名次重造 [1.0, 0.1]**（reranking.py:252-263）再乘三 boost（:305-306）；stage-2 因 passthrough 判定跳过。
+1. **CE 路径（默认 cross_encoder）**：初值 = CE 归一分（reranking.py:500）→ `apply_combined_scoring` 覆写为 `combined_score`（:306）→ `apply_post_rerank_boost` 原地加 stage-2 加项（recall_boost.py:244）。**例外**：served_provider 是决策模型重排器时既不做 combined scoring 也不做加法 boost，`weight` 停在初值（me:10493-10496 的分支）。
+2. **interleave 模式**：`weight = rrf_score`（me:10498-10505，即 interleave_fusion 写入的位置伪分数 `float(n - pos)`，fusion.py:170）——**跳过 combined scoring**，stage-2 也不加，全程保轮询序。
+3. **显式 rrf 模式**：me:10455-10467 构造的初值是 `weight=0.0`（:10466，:10467 只是按 rrf_score 排的构造序）→ 随后走 `elif scored_results:` 分支（:10506-10531）`apply_combined_scoring(is_passthrough=True)`——**CE 归一分由 RRF 名次重造 [1.0, 0.1]**（reranking.py:252-263）再乘三 boost（:305-306）；stage-2 因 passthrough 判定跳过。
 
 （X2 裁决原样保留：interleave 与显式 rrf 的区别在于——interleave 的 weight 停在 rrf_score、跳过 combined scoring；显式 rrf 的 weight 是"RRF 名次重造的 CE 分 × 三 boost"。）**并列处理**：Python list.sort 稳定，并列保持进入 sort 时的顺序（CE 路径=CE 分降序；passthrough=RRF 序）——代码无显式 tie-break 注释（语言语义保证，有意与否未确认）。
 
-**暴露给调用方**：最终 `MemoryFact.scores = RecallScores(final=sr.weight, reranker=ce_norm 或 None, semantic=arm_scores.semantic, keyword=arm_scores.keyword)`（me:10644-10658；response_models.py:241-262）。passthrough（rrf/interleave、served_provider=="rrf" 或 RANK_SCORE_PROVIDERS 成员）下 `reranker=None`（:10640-10646）。MemoryFact 本体只带 id/text/fact_type/entities/context/日期/document_id/metadata/chunk_id/tags/source_fact_ids/scores/attachment_ids（:10662-10685）；`rrf_score/rrf_rank/source_ranks/combined_score/rrf_normalized/recency/proof_norm` 等仅进 trace（`ScoredResult.to_dict` types.py:206-253，含 legacy 别名 `activation=weight` :251）。trace 边界：tracer 恒存在（阶段耗时永远记录），但候选/访问节点等重 payload 只在 `enable_trace=True` 时构建（me:9425-9436，`test_recall_tracer_payload_gating.py` 守护）；trace 的时间锚点是 `question_date`（:9436-9443）。
+**暴露给调用方**：最终 `MemoryFact.scores = RecallScores(final=sr.weight, reranker=ce_norm 或 None, semantic=arm_scores.semantic, keyword=arm_scores.keyword)`（me:11020-11029；response_models.py:285-306）。passthrough（rrf/interleave、served_provider=="rrf" 或 RANK_SCORE_PROVIDERS 成员）下 `reranker=None`（:11016-11019）。MemoryFact 本体只带 id/text/fact_type/entities/context/日期/document_id/metadata/chunk_id/tags/source_fact_ids/scores/attachment_ids（:11031-11053）；`rrf_score/rrf_rank/source_ranks/combined_score/rrf_normalized/recency/proof_norm` 等仅进 trace（`ScoredResult.to_dict` types.py:206-253，含 legacy 别名 `activation=weight` :251）。trace 边界：tracer 恒存在（阶段耗时永远记录），但候选/访问节点等重 payload 只在 `enable_trace=True` 时构建（me:9793-9805，`test_recall_tracer_payload_gating.py` 守护）；trace 的时间锚点是 `question_date`（注释 me:9788-9791，`SearchTracer(...)` :9793、`query_timestamp=_recall_scoring_now(question_date)` :9799）。
 
 **分数字段全景表**：
 
 | 字段 | 写入环（file:line） | 谁读它 | 进最终排序? | 暴露调用方? |
 |---|---|---|---|---|
-| `RetrievalResult.similarity / bm25_score` | SQL 行（§3.1，recall.py:292-294） | 臂内排序 me:9721-9722；RRF 记入 arm_scores（fusion.py:90-93） | 否（经名次间接） | 是→`RecallScores.semantic/.keyword` |
-| `RetrievalResult.activation` | link_expansion.py:278 | 图臂排序 me:9723 | 否 | 否（仅 trace） |
-| `temporal_score / temporal_proximity` | recall.py:575-576/:702-703 | 时间臂排序 me:9726；`sr.temporal`（reranking.py:284） | 否（经 temporal_boost 间接） | 否 |
+| `RetrievalResult.similarity / bm25_score` | SQL 行（§3.1，recall.py:293-297） | 臂内排序 me:10097-10099；RRF 记入 arm_scores（fusion.py:90-93） | 否（经名次间接） | 是→`RecallScores.semantic/.keyword` |
+| `RetrievalResult.activation` | link_expansion.py:278 | 图臂排序 me:10099 | 否 | 否（仅 trace） |
+| `temporal_score / temporal_proximity` | recall.py:574-575/:687-688 | 时间臂排序 me:10102-10103；`sr.temporal`（reranking.py:284） | 否（经 temporal_boost 间接） | 否 |
 | `rrf_score` | fusion.py:85（interleave :170） | trim 排序键（recall_boost.py:210）；passthrough 种子/权重 | 间接 | 否（trace） |
 | `rrf_rank / source_ranks` | fusion.py:97-103/:86 | stage-1/2 boost 读（recall_boost.py:147/:176） | 否 | 否（trace） |
 | `arm_scores.semantic/.keyword` | fusion.py:90-93 | RecallScores、min_scores 响应语义 | 否 | 是 |
-| `cross_encoder_score(_normalized)` | reranking.py:478-500 | min_scores.reranker；combined 乘法基数 ：305 | 是（基数） | 是（`reranker`，passthrough/rank 分下 None） |
+| `cross_encoder_score(_normalized)` | reranking.py:477-500 | min_scores.reranker；combined 乘法基数 ：305 | 是（基数） | 是（`reranker`，passthrough/rank 分下 None） |
 | `recency / temporal / proof_norm` | reranking.py:273-296 | 仅作 boost 乘子输入 | 是（乘子） | 否（trace） |
 | `rrf_normalized` | reranking.py:300 恒 0.0 | 无（trace 连续性） | 否 | 否 |
 | `combined_score` | reranking.py:305 | 即刻复制给 weight | 是（=boost 前 weight） | 否（trace） |
-| **`weight`** | reranking.py:306 → recall_boost.py:244 | 终排序 me:10156；min_final me:10177-10188；token 选择序 | **是（最终键）** | **是→`RecallScores.final`** |
+| **`weight`** | reranking.py:306 → recall_boost.py:244 | 终排序 me:10531；min_final me:10555-10566；token 选择序 | **是（最终键）** | **是→`RecallScores.final`** |
 | `to_dict["activation"]`（legacy） | types.py:251 = weight | 无 | 否 | 否（trace dict 别名） |
 
 ---
@@ -437,62 +445,63 @@ Step 6 规则（fact_budget.py:61-87）：按名次顺序花预算（`fact_ids_o
 
 ### 4.1 HTTP 顶层六字段
 
-一句人话：HTTP 响应顶层只有 6 个字段——results、trace、entities、chunks、source_facts、source_facts_truncated；没有 degradations、没有 pagination。路由 `POST /v1/default/banks/{bank_id}/memories/recall`，`response_model=RecallResponse`（`api/http.py:6284-6296`）：
+一句人话：HTTP 响应顶层只有 6 个字段——results、trace、entities、chunks、source_facts、source_facts_truncated；没有 degradations、没有 pagination。路由 `POST /v1/default/banks/{bank_id}/memories/recall`，`response_model=RecallResponse`（`api/http.py:5325-5336`）：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `results` | `list[RecallResult]` | 必有，可为空数组（http.py:953） |
-| `trace` | `dict\|None` | `trace=true` 时为 SearchTrace 字典，默认 `null`（http.py:954） |
-| `entities` | `dict[str, EntityStateResponse]\|None` | 默认开启（include.entities 默认非 None，http.py:6345）；**observations 恒为 `[]`**（me:10705 "Mental models provide this now"） |
-| `chunks` | `dict[str, ChunkData]\|None` | 默认关闭（http.py:958）；键为 `{document_id}_{chunk_index}` 风格的 chunk_id |
-| `source_facts` | `dict[str, RecallResult]\|None` | 默认关闭（http.py:959-961） |
-| `source_facts_truncated` | `bool\|None` | 仅请求了 source_facts 才可能非 null（http.py:962-970） |
+| `results` | `list[RecallResult]` | 必有，可为空数组（http.py:934） |
+| `trace` | `dict\|None` | `trace=true` 时为 SearchTrace 字典，默认 `null`（http.py:935） |
+| `entities` | `dict[str, EntityStateResponse]\|None` | 默认开启（include.entities 默认非 None，http.py:5386）；**observations 恒为 `[]`**（me:11082 "Mental models provide this now"） |
+| `chunks` | `dict[str, ChunkData]\|None` | 默认关闭（http.py:939）；键为 `{document_id}_{chunk_index}` 风格的 chunk_id |
+| `source_facts` | `dict[str, RecallResult]\|None` | 默认关闭（http.py:940-942） |
+| `source_facts_truncated` | `bool\|None` | 仅请求了 source_facts 才可能非 null（http.py:943-951） |
 
-单个 result 的字段（http.py:662-708）——**注意 HTTP 层把引擎的 `fact_type` 改名为 `type`**（`_fact_to_result`：`type=fact.fact_type`，http.py:6401）：`id, text, type, entities, context, occurred_start, occurred_end, mentioned_at, document_id, metadata, chunk_id, tags, source_fact_ids, scores, attachments`。`attachments` 由 `_attach_to_recall_results` 回填（http.py:1094-1132），无附件时为 `null`。
+单个 result 的字段（http.py:644-712）——**注意 HTTP 层把引擎的 `fact_type` 改名为 `type`**（`_fact_to_result`：`type=fact.fact_type`，http.py:5442）：`id, text, type, entities, context, occurred_start, occurred_end, mentioned_at, document_id, metadata, chunk_id, tags, source_fact_ids, scores, attachments`。`attachments` 由 `_attach_to_recall_results` 回填（http.py:1076-1112），无附件时为 `null`。
 
-`scores` = `RecallScores` 四元组（`engine/response_models.py:241-262`）：
+`scores` = `RecallScores` 四元组（`engine/response_models.py:285-306`）：
 
-- `final`（必有）：最终排序分 = `CE_norm × recency_boost × temporal_boost × proof_count_boost`（`engine/search/reranking.py:193-198, 300-304`；α 分别 0.2/0.2/0.1，即 boost ∈ [1-α/2, 1+α/2]）。
-- `reranker`：CE 归一化 0-1；**passthrough（rrf/interleave）或 rank 型 provider（`RANK_SCORE_PROVIDERS = {"typesafe", "decision_model"}`，`engine/cross_encoder.py:84-85`）时为 `null`**（me:10640-10652）。
-- `semantic`：余弦相似度（`1 - (embedding <=> q)`，`engine/memories/pg/recall.py:479`）；该结果未被语义臂命中时 `null`。
+- `final`（必有）：最终排序分 = `CE_norm × recency_boost × temporal_boost × proof_count_boost`（`engine/search/reranking.py:195-200, 302-306`；α 分别 0.2/0.2/0.1，即 boost ∈ [1-α/2, 1+α/2]）。
+- `reranker`：CE 归一化 0-1；**passthrough（rrf/interleave）或 rank 型 provider（`RANK_SCORE_PROVIDERS = {"typesafe", "decision_model"}`，`engine/cross_encoder.py:98`）时为 `null`**（me:11016-11029）。
+- `semantic`：余弦相似度（`1 - (embedding <=> q)`，`engine/memories/pg/recall.py:487`）；该结果未被语义臂命中时 `null`。
 - `keyword`：BM25 分（native= `ts_rank_cd`，`engine/sql/postgresql.py:429`；≥0 无上界）；未被关键词臂命中时 `null`。
 
 ### 4.2 不暴露的内部字段与三个反直觉点
 
-**一句人话**：算分链上大半信号调用方永远看不到——但 trace 里能看全。**不暴露**：`temporal_score`/`temporal_proximity`/`recency`/`temporal`/`proof_norm`——这些时间/辅助信号只进 trace 的 **reranked 条目**（X2 修正：temporal 确实进 reranked trace 条目；`ScoredResult.to_dict`，types.py:232-235,246-248，经 me:10198-10200 序列化）；trace 的 visits.weights（`WeightComponents`，trace.py:47-59）只有 activation/semantic_similarity/recency/frequency/final_weight，**没有 temporal**（`tracer.visit_node` 也无 temporal 参数）。响应体不暴露上述任何一个；rrf_score、`source_ranks`/`arm_scores`（MergedCandidate 内部，fusion.py:100-106）、`attachment_ids`（`exclude=True`，response_models.py:426-430）、`store_stages`（`exclude=True`，:492-496）同样不进响应。
-- `trace` 字典形状 = `SearchTrace.to_dict()`（trace.py:149-183）：`query / retrieval_results / rrf_merged / reranked / entry_points / visits / summary / final_results`。**响应里没有 `degradations` 键**——臂级降级（如 Oracle Text 失败回退纯语义，recall.py:240-278）只在日志/trace phase metrics 中可见，不改变响应结构（全仓 `hindsight_api/` 内 grep "degradation" 无 recall 相关命中）。
+**一句人话**：算分链上大半信号调用方永远看不到——但 trace 里能看全。**不暴露**：`temporal_score`/`temporal_proximity`/`recency`/`temporal`/`proof_norm`——这些时间/辅助信号只进 trace 的 **reranked 条目**（X2 修正：temporal 确实进 reranked trace 条目；`ScoredResult.to_dict`，types.py:232-235,246-248，经 me:10568-10575 序列化）；trace 的 visits.weights（`WeightComponents`，trace.py:47-59）只有 activation/semantic_similarity/recency/frequency/final_weight，**没有 temporal**（`tracer.visit_node` 也无 temporal 参数）。响应体不暴露上述任何一个；rrf_score、`source_ranks`/`arm_scores`（MergedCandidate 内部，fusion.py:100-106）、`attachment_ids`（`exclude=True`，response_models.py:474，在 `MemoryFact` 上）、`store_stages`（`exclude=True`，response_models.py:540）同样不进响应。
+- `trace` 字典形状 = `SearchTrace.to_dict()`（trace.py:149-183）：`query / retrieval_results / rrf_merged / reranked / entry_points / visits / summary / final_results`。**响应里没有 `degradations` 键**——臂级降级（如 Oracle Text 失败回退纯语义，recall.py:236-280）只在日志/trace phase metrics 中可见，不改变响应结构（全仓 `hindsight_api/` 内 grep "degradation" 无 recall 相关命中）。
 
-> **反直觉点 ①**：`max_tokens` **只数各 result 的 `text` token**（fact_budget.py:43-87；MCP 侧 mcp_tools.py:1276-1278 同理）——id/tags/scores/日期不计入；chunks 另有独立预算 `max_chunk_tokens`（默认 8192），entities 与 source_facts 各有独立预算（§3.7 Step 6）。
-> **反直觉点 ②**：`entities[].observations` **恒为空数组**（me:10700-10710，注释在 :10705，原话 "Mental models provide this now"）——observation 内容由 mental models 承载，这个字段只是历史形状残留。
+> **反直觉点 ①**：`max_tokens` **只数各 result 的 `text` token**（fact_budget.py:43-87；MCP 侧 mcp_tools.py:1252-1256 同理）——id/tags/scores/日期不计入；chunks 另有独立预算 `max_chunk_tokens`（默认 8192），entities 与 source_facts 各有独立预算（§3.7 Step 6）。
+> **反直觉点 ②**：`entities[].observations` **恒为空数组**（me:11070-11083，注释在 :11082，原话 "Mental models provide this now"）——observation 内容由 mental models 承载，这个字段只是历史形状残留。
 > **反直觉点 ③**：**HTTP 把 `fact_type` 改名为 `type`，MCP 保留 `fact_type`**——同一个引擎模型两种键名，跨协议移植代码时最容易踩。
 
 ### 4.3 MCP 差异
 
-一句人话：MCP 的 recall 就是引擎模型整包 JSON 序列化——键名、形状都与 HTTP 不同，且错误不抛异常而是返回 error JSON。`hindsight_api/mcp_tools.py:1261-1391`（`_register_recall`）与 HTTP 的关键差异：
+一句人话：MCP 的 recall 就是引擎模型整包 JSON 序列化——键名、形状都与 HTTP 不同，且错误不抛异常而是返回 error JSON。`hindsight_api/mcp_tools.py:1225-1355`（`_register_recall`）与 HTTP 的关键差异：
 
-1. **整包序列化**：返回 `recall_result.model_dump_json()`（:1383），即引擎模型 `RecallResult`（response_models.py:463-513）——字段名是 **`fact_type`** 而非 HTTP 的 `type`（反直觉点 ③），且 `scores`/`entities`/`chunks` 形状与引擎一致。仅去掉了 `indent=2`（缩进曾占响应约 1/5）。
-2. **默认值不同**：`budget="high"`（:1271）vs HTTP 默认 `mid`（http.py:588）；`max_tokens=4096` 两边相同。**`max_tokens` 只约束各 result 的 `text`**（:1290-1292，反直觉点 ①），id/tags/scores/日期不计入。
-3. **1.0.0（#5678，commit `c4c572c40`）补齐三个 enrichment 开关**：MCP recall 新增 `include_chunks`/`include_entities`/`include_source_facts`（默认全 `False`）与配套预算 `max_chunk_tokens`(8192)/`max_entity_tokens`(500)/`max_source_facts_tokens`(4096)（`mcp_tools.py:1280-1285`），请求时响应里相应键的形状与 HTTP/引擎一致（chunk 键、实体观察恒空、source_facts 截断标志）——此前 MCP 侧拿不到这三类数据。
-4. **错误形态**：`OperationValidationError`/`ValueError`/异常 → 字符串 JSON `{"error": ..., "results": []}`（:1386-1391），不抛 MCP 错误。
+1. **整包序列化**：返回 `recall_result.model_dump_json()`（:1347），即引擎模型 `RecallResult`（response_models.py:507-559）——字段名是 **`fact_type`** 而非 HTTP 的 `type`（反直觉点 ③），且 `scores`/`entities`/`chunks` 形状与引擎一致。仅去掉了 `indent=2`（缩进曾占响应约 1/5）。
+2. **默认值不同**：`budget="high"`（:1234）vs HTTP 默认 `mid`（http.py:571）；`max_tokens=4096` 两边相同。**`max_tokens` 只约束各 result 的 `text`**（:1252-1256，反直觉点 ①），id/tags/scores/日期不计入。
+3. **1.0.0（#5678，commit `c4c572c40`）补齐三个 enrichment 开关**：MCP recall 新增 `include_chunks`/`include_entities`/`include_source_facts`（默认全 `False`）与配套预算 `max_chunk_tokens`(8192)/`max_entity_tokens`(500)/`max_source_facts_tokens`(4096)（`mcp_tools.py:1244-1249`），请求时响应里相应键的形状与 HTTP/引擎一致（chunk 键、实体观察恒空、source_facts 截断标志）——此前 MCP 侧拿不到这三类数据。
+4. **错误形态**：`OperationValidationError`/`ValueError`/异常 → 字符串 JSON `{"error": ..., "results": []}`（:1348-1355），不抛 MCP 错误。
 5. 银行级 MCP 可用 `recall_description` 覆盖工具描述（api/mcp.py:178,195）。
+6. **1.1.0 的一处小加固**：MCP 的 `query_timestamp` 解析现在会拒绝占位年份（year-1/9999）——`parse_timestamp` 解析成功后过一遍 `is_placeholder_date` 并抛 `ValueError`（`mcp_tools.py:495-508`），与时间臂把占位日期当未知的口径一致；HTTP 侧 `query_timestamp` 没有这道检查。
 
 ### 4.4 reflect 呈现层：agent 实际看到的形状
 
-一句人话：reflect 的 agent 看到的不是 recall 原始 JSON，而是经 presenter 压缩过的精简版——id 换短别名、时间戳截到分钟、分数与来源字段被剥掉。现行 reflect 是**工具型 agent**（`engine/reflect/agent.py:run_reflect_agent`），记忆通过 `tool_recall`/`tool_search_observations`（`engine/reflect/tools.py:470-540 / :377-469`）进入 prompt：
+一句人话：reflect 的 agent 看到的不是 recall 原始 JSON，而是经 presenter 压缩过的精简版——id 换短别名、时间戳截到分钟、分数与来源字段被剥掉。现行 reflect 是**工具型 agent**（`engine/reflect/agent.py:run_reflect_agent`），记忆通过 `tool_recall`/`tool_search_observations`（`engine/reflect/tools.py:489-558 / :396-486`）进入 prompt：
 
-- 工具原始返回（tool_recall）：`{query, memories: [MemoryFact.model_dump()], chunks: {...}}`（tools.py:531-540）；`search_observations` 额外带 `is_stale/freshness`（:460-468）。
-- 写入 prompt 前经 `ToolResultPresenter.present`（`engine/reflect/presentation.py:131-173`）压缩：id→短别名（memories→`f1`…、observations→`o1`、**mental_models→`p1`**、chunks→`c1`，:41-49）；时间戳截到分钟 `2026-03-07 12:00`（:54-59）；`occurred_end==occurred_start` 时删除（:189-190）；列表常量 `fact_type` 删除（:51,:181）；重复条目只列进 `already_shown`（:153-156）；`count` 字段删除（:167-168）；`scores/chunk_id/document_id` 在更早的 `_drop_unread_fields` 被剥掉（tools.py:73-84），`None`/空串/空集字段被 `_prune_nulls` 删掉（tools.py:86-100）。
+- 工具原始返回（tool_recall）：`{query, memories: [MemoryFact.model_dump()], chunks: {...}}`（tools.py:549-558）；`search_observations` 额外带 `is_stale/freshness`（:469-486）。
+- 写入 prompt 前经 `ToolResultPresenter.present`（`engine/reflect/presentation.py:131-173`）压缩：id→短别名（memories→`f1`…、observations→`o1`、**mental_models→`p1`**、chunks→`c1`，:41-49）；时间戳截到分钟 `2026-03-07 12:00`（:54-59）；`occurred_end==occurred_start` 时删除（:189-190）；列表常量 `fact_type` 删除（:51,:181）；重复条目只列进 `already_shown`（:153-156）；`count` 字段删除（:167-168）；`scores/chunk_id/document_id` 在更早的 `_drop_unread_fields` 被剥掉（tools.py:88-99），`None`/空串/空集字段被 `_prune_nulls` 删掉（tools.py:101-115）。
 - 遗留 `format_facts_for_prompt`（`engine/search/think_utils.py:53-78`）**只被同文件的独立 `reflect()` 使用**（:211-212；仓内仅 tests 引用）：JSON 数组，每项仅 `{"text", "context?", "occurred_start?", "occurred_end?", "mentioned_at?"}`（datetime 用 `%Y-%m-%d %H:%M:%S`，str 原样），空列表 → `"[]"`。
 
 ### 4.5 错误与降级形态（简）
 
-`min_scores.reranker` + 主 reranker 为名次分成员（typesafe 或 1.0.0 起的决策模型重排器）→ **HTTP 400**（me:9056-9070）；failover 链落到名次分成员时不拒绝：忽略该 floor 并留 `[4.9] min_scores.reranker ignored` 日志（me:10170-10176），`scores.reranker=null`。`min_scores.semantic/keyword` 是 SQL 臂内截断；`reranker/final` 是排序后逐结果谓词（闭区间 `>=`，me:10177-10188）；响应保证非 null 分必过其 floor，臂未命中的字段仍是 `null`（response_models.py:265-292）。空查询 → 422（http.py:1633-1636）；非法 fact_type → 422（me:9045-9054）；`query_timestamp` 解析失败 → 400；超时 → 504；其余 → 500（http.py:6497-6516）。空结果就是 `results: []`，没有专门错误形态；超长 query 自 v0.10.3（#5388）起**截断而非 400**。
+`min_scores.reranker` + 主 reranker 为名次分成员（typesafe 或 1.0.0 起的决策模型重排器）→ **HTTP 400**（me:9411-9423）；failover 链落到名次分成员时不拒绝：忽略该 floor 并留 `[4.9] min_scores.reranker ignored` 日志（me:10547-10552），`scores.reranker=null`。`min_scores.semantic/keyword` 是 SQL 臂内截断；`reranker/final` 是排序后逐结果谓词（闭区间 `>=`，me:10555-10566）；响应保证非 null 分必过其 floor，臂未命中的字段仍是 `null`（response_models.py:309-345）。空查询 → 422（`RecallRequest.validate_query_not_empty`，http.py:626-635——1.0.0 起就在模型校验层拒绝，不进 handler，本窗口未改）；非法 fact_type → 422（me:9403-9408）；`query_timestamp` 解析失败 → 400（http.py:5377-5381）；超时 → 504（http.py:5548-5558）；其余 → 500（http.py:5540-5560）。**准入拒绝是 503**：HTTP 准入车道等不到许可时返回 503 + `Retry-After`（`AdmissionRejected` → `api/http.py:4686-4691` 构造 503 与 `Retry-After`；lane/等待秒数在 `api/admission.py:76-91`），发生在请求体解析之前，与上面几个业务错误不是一层。空结果就是 `results: []`，没有专门错误形态；超长 query 自 v0.10.3（#5388）起**截断而非 400**。
 
 ---
 
 ## 5. 端到端 worked example
 
-一句人话：3 条记忆、一次 `recall(query="项目排期", budget="mid")`，从四路取数手算到最终 JSON。**数值已四稿交叉互证，此处一字不改**；标注 **[示例假定]** 者为演示用假定值，其余均可按代码中的公式实算。场景：bank `demo`，HTTP `recall(query="项目排期", budget="mid")`，其余参数默认（trace=false、include.entities 默认开、max_tokens=4096）。查询日 `question_date` **[示例假定]** 2026-04-15T00:00:00Z（未传 query_timestamp 时为当前时刻，此处固定便于复算）。budget=mid + 默认 `recall_budget_function="fixed"` → thinking_budget=300（config.py:2075，me:1629-1662）。
+一句人话：3 条记忆、一次 `recall(query="项目排期", budget="mid")`，从四路取数手算到最终 JSON。**数值已四稿交叉互证，且 1.1.0 逐条复核未变**（四臂 SQL 模板、RRF、CE 归一与三重 boost 的代码在 1.1.0 均未改动，唯一会改变算分的新规则是"占位日期当作未知"，本例三条记忆都没有占位日期）；标注 **[示例假定]** 者为演示用假定值，其余均可按代码中的公式实算。场景：bank `demo`，HTTP `recall(query="项目排期", budget="mid")`，其余参数默认（trace=false、include.entities 默认开、max_tokens=4096）。查询日 `question_date` **[示例假定]** 2026-04-15T00:00:00Z（未传 query_timestamp 时为当前时刻，此处固定便于复算）。budget=mid + 默认 `recall_budget_function="fixed"` → thinking_budget=300（config.py:2133，me:1674-1704）。
 
 ### 5.0 三行 memory_units（[示例假定] 的行，字段名照 PG 表）
 
@@ -504,14 +513,14 @@ Step 6 规则（fact_budget.py:61-87）：按名次顺序花预算（`fact_ids_o
 
 查询向量 **[示例假定]** q=[0.8,0.6,0,0]（‖q‖=√(0.64+0.36)=1.0）。
 
-### 5.1 四路取回（me:9700-9745 → store `recall_unified`）
+### 5.1 四路取回（me:10093-10115 → store `recall_unified`）
 
-- **语义臂**（cos = q·e，单位向量即点积）：U1=0.8×0.7+0.6×0.6=**0.92**；U2=0.8×0.64+0.6×0.48=**0.80**；U3=**0.00**。阈值 0.3（config.py:1377）→ U3 出局。排序：U1(rank1) > U2(rank2)。
+- **语义臂**（cos = q·e，单位向量即点积）：U1=0.8×0.7+0.6×0.6=**0.92**；U2=0.8×0.64+0.6×0.48=**0.80**；U3=**0.00**。阈值 0.3（config.py:1421）→ U3 出局。排序：U1(rank1) > U2(rank2)。
 - **BM25 臂**：`tokenize_query` 去标点小写按空白切分（retrieval.py:28-34）→ ["项目排期"]。native tsvector 臂对 token 做 OR 连接（sql/postgresql.py 的 native 分支注释：native 用 `'|'`）→ **[示例假定]** 分词/中文匹配使 U1、U2 命中两词、U3 仅命中"项目"：score U1=0.12、U2=0.10、U3=0.05（ts_rank_cd 值为假定）。排序 U1>U2>U3。
-- **时间臂**：查询文本无日期且未传 temporal_window → 约束提取返回 None → **整臂跳过**，不进融合（retrieval.py:163-179；me:9803-9804 只在 `temporal_results` 非空时加入）。*假想*：若传 `temporal_window=2026-03-01..2026-03-31`，U1 的 occurred 区间命中窗口四条件之一（recall.py:484-493），其 temporal_proximity=1−min(days_from_mid/(total_days/2),1)，best_date=区间中点 2026-03-16=窗口中点 → **1.0**（recall.py:555-576）。
-- **图臂**（link_expansion.py:133-279）：种子=语义臂中 ≥ `graph_seed_min_similarity=0.3`（config.py:1378）者，即 U1、U2。**[示例假定]** memory_links 一行：U1→U3（共享实体"Alpha 团队"，entity 信号，count=1）。U3 图分 = tanh(1×0.5)=**0.462117**（:249，实体项；semantic/causal 项 0），图臂排序 U3(rank1)。
+- **时间臂**：查询文本无日期且未传 temporal_window → 约束提取返回 None → **整臂跳过**，不进融合（retrieval.py:100-126；me:10330-10331 只在 `temporal_results` 非空时加入融合列表）。*假想*：若传 `temporal_window=2026-03-01..2026-03-31`，U1 的 occurred 区间命中窗口四条件之一（recall.py:492-500），其 temporal_proximity=1−min(days_from_mid/(total_days/2),1)，best_date=区间中点 2026-03-16=窗口中点 → **1.0**（recall.py:563-576）。
+- **图臂**（link_expansion.py:133-278）：种子=语义臂中 ≥ `graph_seed_min_similarity=0.3`（config.py:1422）者，即 U1、U2。**[示例假定]** memory_links 一行：U1→U3（共享实体"Alpha 团队"，entity 信号，count=1）。U3 图分 = tanh(1×0.5)=**0.462117**（:249，实体项；semantic/causal 项 0），图臂排序 U3(rank1)。
 
-### 5.2 RRF 融合（fusion.py:29-109，k=60；me:9941-9980）
+### 5.2 RRF 融合（fusion.py:29-109，k=60；me:10329-10355）
 
 `score = Σ 1/(60+rank)`，rank 从 1 起：
 
@@ -524,20 +533,20 @@ Step 6 规则（fact_budget.py:61-87）：按名次顺序花预算（`fact_ids_o
 注意 RRF 把单臂第一名的 U3 顶到了 U2 之前（0.032266>0.032258）——CE 阶段会修正它。
 `source_ranks`：U1={semantic_rank:1,bm25_rank:1}，U2={semantic_rank:2,bm25_rank:2}，U3={bm25_rank:3,graph_rank:1}；`arm_scores` 只收录 semantic/keyword 两个臂的原始分（fusion.py:90-93）。
 
-### 5.3 重排 + 组合评分（me:9984-10153；reranking.py:176-306）
+### 5.3 重排 + 组合评分（me:10361-10531；reranking.py:176-306）
 
 CE 归一分 **[示例假定]**：CE(U1)=0.83、CE(U2)=0.71、CE(U3)=0.35（重排后 U1>U2>U3）。
 
-- recency（线性，365 天窗，下限 0.1，reranking.py:77-80；粗粒度"日历月"跨度从区间**末端**计龄且封顶 0.5，reranking.py:150-161）：
+- recency（线性，365 天窗，下限 0.1，reranking.py:77-80；粗粒度"日历月"跨度从区间**末端**计龄且封顶 0.5，reranking.py:150-159）：
   - U1：2026-03-01→03-31 恰为一个日历月 → 末端 03-31 距查询 15 天，raw=1−15/365=0.9589 → **cap 0.5** → boost=1+0.2×(0.5−0.5)=**1.0**
   - U2：mentioned_at 04-10，5 天 → 1−5/365=0.986301 → boost=1+0.2×0.486301=**1.097260**
   - U3：mentioned_at 02-20，54 天 → 1−54/365=0.852055 → boost=1+0.2×0.352055=**1.070411**
-- temporal_boost：时间臂缺席 → 0.5 → **1.0**；proof_boost：非 observation → **1.0**（reranking.py:284-293）。
+- temporal_boost：时间臂缺席 → 0.5 → **1.0**；proof_boost：非 observation → **1.0**（reranking.py:284-296）。
 - final = CE × 1.0(三 boost 之积按各自算)：U1=0.83×1.0=**0.83**；U2=0.71×1.097260=**0.779055**；U3=0.35×1.070411=**0.374644**。
 
-Step 5/6：预算 300→重排候选无截断；`select_facts_within_budget` 只数 `text` token（fact_budget.py:43-87；me:10412-10423）→ 三条全入选（合计 ~60 token < 4096）。
+Step 5/6：预算 300→重排候选无截断；`select_facts_within_budget` 只数 `text` token（fact_budget.py:43-87；me:10789-10801）→ 三条全入选（合计 ~60 token < 4096）。
 
-### 5.4 最终 HTTP JSON（照 http.py:662-708 / 909-970 契约）
+### 5.4 最终 HTTP JSON（照 http.py:644-712 与 Response 模型 :891-951 的契约）
 
 ```json
 {
@@ -569,11 +578,11 @@ Step 5/6：预算 300→重排候选无截断；`select_facts_within_budget` 只
 }
 ```
 
-自洽点：`semantic=null` 的 U3 只由 BM25+图臂命中（MinScores 文档承诺的 null 语义，response_models.py:265-292）；`entities[].observations` 恒空（me:10700-10710）；U1 的 `scores.reranker=0.83` 而 `final=0.83` 因粗粒度月份封顶恰好吃满中性 recency。**MCP 版同一请求**的差异：键 `fact_type`（非 `type`）、无 `attachments` 字段（引擎 MemoryFact 无此公开字段）、budget 默认 high → thinking_budget=1000。
+自洽点：`semantic=null` 的 U3 只由 BM25+图臂命中（MinScores 文档承诺的 null 语义，response_models.py:309-345）；`entities[].observations` 恒空（me:11070-11083）；U1 的 `scores.reranker=0.83` 而 `final=0.83` 因粗粒度月份封顶恰好吃满中性 recency。**MCP 版同一请求**的差异：键 `fact_type`（非 `type`）、无 `attachments` 字段（引擎 MemoryFact 无此公开字段）、budget 默认 high → thinking_budget=1000。
 
 ### 5.5 reflect 场景下 agent 看到的文本
 
-`tool_recall` 经 presenter 后（presentation.py:131-191；tools.py:67-100）：
+`tool_recall` 经 presenter 后（presentation.py:131-191；tools.py:82-115）：
 
 ```json
 {"query": "项目排期",
@@ -596,39 +605,44 @@ Step 5/6：预算 300→重排候选无截断；`select_facts_within_budget` 只
 
 ### 6.1 Oracle 执行期改写清单
 
-一句人话：手写 PG 风格 SQL 落到 Oracle 上有一层机械改写器兜底，但有些 PG 专有语法它改不动——消费者必须自备替代。`_rewrite_pg_to_oracle`（`engine/db/oracle.py:343+`）：
+一句人话：手写 PG 风格 SQL 落到 Oracle 上有一层机械改写器兜底，但有些 PG 专有语法它改不动——消费者必须自备替代。`_rewrite_pg_to_oracle`（`engine/db/oracle.py:344+`）：
 
 | PG 形态 | Oracle 改写 | 位置 |
 |---|---|---|
-| `$N` 绑定 | `:N` | oracle.py:354 |
-| `col <=> :1` | `VECTOR_DISTANCE(col, :1, COSINE)` | :518-522 |
-| `LIMIT n` | `FETCH FIRST n ROWS ONLY` | :572-577 |
-| `= ANY(:N)` | `IN (/*EXPAND:N*/)` 展开为多 bind | :641-644 |
-| `!= ALL(:N)` | `NOT IN (/*EXPAND:N*/)` | :646-647 |
-| `array_position(:N, col)` | `/*ARRAY_POSITION:N:col*/` 占位符，随后 `_replace_array_position`（:1036-1058）展开为 `CASE col WHEN :v0 THEN 1 ... END`（:655-658——Oracle 无 array_position，list bind 会以 JSON 字符串到达致 ORA-00932） | :655-658 |
-| `CROSS JOIN LATERAL` | `CROSS APPLY` | :672-673 |
-| `DISTINCT ON` | **不改写**，消费者必须自备 Oracle 替代（:675-677，即 Oracle 图 CTE 用 ROW_NUMBER 的原因） | :675-677 |
+| `$N` 绑定 | `:N` | oracle.py:355 |
+| `col <=> :1` | `VECTOR_DISTANCE(col, :1, COSINE)` | :517-521 |
+| `LIMIT n` | `FETCH FIRST n ROWS ONLY`（连同 OFFSET 变体与 FOR UPDATE 的 ROWNUM 分支） | :557-568 |
+| `= ANY(:N)` | `IN (/*EXPAND:N*/)` 展开为多 bind | :645 |
+| `!= ALL(:N)` | `NOT IN (/*EXPAND:N*/)` | :648 |
+| `array_position(:N, col)` | `/*ARRAY_POSITION:N:col*/` 占位符，随后 `_replace_array_position`（:1036-1058）展开为 `CASE col WHEN :v0 THEN 1 ... END`（:655-658——Oracle 无 array_position，list bind 会以 JSON 字符串到达致 ORA-00932） | :656-658, :1037-1059 |
+| `CROSS JOIN LATERAL` | `CROSS APPLY` | :673-674 |
+| `DISTINCT ON` | **不改写**，消费者必须自备 Oracle 替代（:676-678，即 Oracle 图 CTE 用 ROW_NUMBER 的原因） | :676-678 |
 
-recall 相关 SQL 实际上大多在构造期就已方言化（arm builders / CTE builders），改写层只兜住散落的手写片段；temporal 扩散的 `unnest($2::uuid[])` 无 Oracle 等价，直接跳过该步（recall.py:607-611）。
+recall 相关 SQL 实际上大多在构造期就已方言化（arm builders / CTE builders），改写层只兜住散落的手写片段；temporal 扩散的 `unnest($2::uuid[])` 无 Oracle 等价，直接跳过该步（recall.py:604-607）。
 
 ### 6.2 两处滞后注释，勿信
 
 读码时以实现为准的注释陷阱（03 篇 3.11 另记第三处）：
-1. **`link_expansion.py:16` 模块 docstring**：写 causal 分 "Score = weight + 1.0"，与实现 ：257-260 不符——实现是纯 weight。
-2. **`link_expansion.py:419-421` 注释**：称 "Both backends now use the observation_sources junction table"，但 PG 实现仍走 `source_memory_ids` 数组 unnest——junction 表只用于 Oracle（ops_oracle.py:850-876）；与 ops.py 抽象方法 docstring（:623-627）一致，link_expansion.py 的注释过时。
+1. **`link_expansion.py:16` 模块 docstring**：写 causal 分 "Score = weight + 1.0"，与实现 ：257-259 不符——实现是纯 weight。
+2. **`link_expansion.py:418-420` 注释**：称 "Both backends now use the observation_sources junction table"，但 PG 实现仍走 `source_memory_ids` 数组 unnest——junction 表只用于 Oracle（ops_oracle.py:850-876）；与 ops.py 抽象方法 docstring（:623-627）一致，link_expansion.py 的注释过时。
 
 ### 6.3 存疑与未确认（研究稿遗留，原样保留）
 
 四稿交叉互证后仍无法闭环的点，列为存疑而非结论：
-1. **fact_type CHECK 模型/迁移分歧**：PG 迁移定稿四值 `('world','experience','opinion','observation')`（t5o6p7q8r9s0:50），SQLAlchemy 模型 models.py:164 与 Oracle 基线 o1a2b3c4d5e6:133 为三值（无 opinion）。运行时代码普遍按 `('experience','world')` + observation 处理（如 reads.py:471,485），opinion 是否可达 HEAD 写路径未确认。
+1. **fact_type CHECK 模型/迁移分歧**：PG 迁移定稿四值 `('world','experience','opinion','observation')`（t5o6p7q8r9s0:50），SQLAlchemy 模型 models.py:170 与 Oracle 基线 o1a2b3c4d5e6:133 为三值（无 opinion）。运行时代码普遍按 `('experience','world')` + observation 处理（如 reads.py:471,485），opinion 是否可达 HEAD 写路径未确认。
 2. `history` 列的终态：p1k2l3m4n5o6 加列、a7b8c9d0e1f2 又 `ADD COLUMN IF NOT EXISTS history`、a1c9e7f3b2d8 再 drop 相关 FK——history 是否仍活跃写入未逐行确认（对 recall 无影响）。
 3. pg_textsearch 的 `search_vector` dummy TEXT 列在 HEAD 是否仍被写入任何值未确认（`pg_search_vector_expr` 对其返回 None，应为恒 NULL）。
-4. recall.py:59-61 引用的迁移文件名 `a3b4c5d6e7f8_add_partial_hnsw_indexes.py` 不存在；同 revision 实为 consolidation_failed_at 迁移。partial HNSW 现行真实来源是 d5e6f7a8b9c0 + ops_postgresql.py:1283-1296 运行时创建——docstring 所指形态已漂移（此条同时是"注释勿信"清单的第三处，03 篇 3.11 已记）。
+4. recall.py:60-62 引用的迁移文件名 `a3b4c5d6e7f8_add_partial_hnsw_indexes.py` 不存在；同 revision 实为 consolidation_failed_at 迁移。partial HNSW 现行真实来源是 d5e6f7a8b9c0 + ops_postgresql.py:1285-1298 运行时创建——docstring 所指形态已漂移（此条同时是"注释勿信"清单的第三处，03 篇 3.11 已记）。
 5. PR 编号未确认项：#4804（Oracle Text BM25 形态出处提示）、#5388（入口统一截断的 PR 号，代码注释引的是 #298/#3134/#1875）、#5295（temporal 豁免，代码注释引 #4494/#4939/#4653）——机制本身均已按代码确认，仅编号无法在仓内取证。
 6. worked example 的 BM25 三行分值与"两词命中"切词结论为 [示例假定]（native english 配置下 CJK 切词行为取决于 PG 默认 parser/所用扩展，未在真实库复算）；图臂示例假定 U1→U3 单信号实体链路，真实 `_expand_combined` 三信号可能叠加。
 7. 并列 tie-break 是否有意依赖稳定排序：代码无注释，属语言语义推断（§3.8）。
-8. `memory_engine.py:8896` 有一条提前返回空 `RecallResultModel(results=[], …)` 的路径，其触发条件未逐行确认。
+8. ~~`memory_engine.py:8896` 提前返回空 `RecallResultModel` 的触发条件未确认~~——**1.1.0 复核已闭环**：触发条件是 `fact_type` 过滤掉历史值 `opinion` 后为空（memory_engine.py:9396-9399），此时直接返回 `RecallResultModel(results=[], entities={}, chunks={})`。
 9. 控制面 #5410（recall 代理补传 `source_facts`/`source_facts_truncated`，`6a9fa03a1`）只核了 commit 标题与引擎侧契约，未逐行读 CP 代理代码。
+10. **`onnx` 重排器**（#5748）只核了类实现与默认值（`cross_encoder.py:1878-2069`、`config.py:1512-1519`），没有在真实 ONNX 导出上跑过；只设 `model_path`、不设 `tokenizer_name_or_path` 时只有一条 warning（条件是 `if model_path and tokenizer_name_or_path is None:`，`cross_encoder.py:1909-1914`），此时会回退到用 `model_id` 加载 tokenizer——这条回退路径未验证。
+11. **Cohere 在飞上限（#5831）与 failover 链的交互**：`CrossLoopSemaphore` 建在 `CohereCrossEncoder` 实例上，多成员链里每个 Cohere 成员各有一个上限；合成上限是多少、与 `RerankerMemberConfig` 的 per-member 配置如何叠加，本文未追。
+12. **决策模型重排器"失败即抛"的最终归宿**：`DecisionModel.ask_all` 不再吞掉失败请求（`decision_model.py:286-296`），但异常到 HTTP 层究竟是 500 还是被 failover 链接住，取决于 recall 用的是单 provider 还是链——本文只确认了单 provider 路径（`cross_encoder.py` 的 `MultiCrossEncoder` 未逐行读）。
+13. **占位日期在 Oracle 侧的行为**：迁移 `c7e2f9a4d1b8` 是 PG-only（Oracle 没有 infinite timestamp），`finite_utc` 对 Oracle 读回的裸时间按 UTC 补齐；"Oracle 上 year-9999 是有限值、SQL 算术可用"取自迁移注释，未在 Oracle 上实测。
+14. **准入车道的实测**：`api/admission.py` 的 12.8s p50 来自模块 docstring 引用的测量，仓内没有对应基准脚本；recall 车道默认值（核数 ×16、等 30s）在生产流量下的 503 比例未验证。
 
 ---
 
