@@ -1,6 +1,6 @@
 # 08 · Memlake —— 对象存储原生的企业级记忆引擎
 
-> 代码基线：`5331da2f4`（v1.0.0，2026-10-16）；本篇随 1.0.0 增量更新轮新增（Memlake 于 2026-10-13 与 v1.0.0 同日发布，素材由 commit `610c135b6` 落库）。
+> 代码基线：`bc5ea195a`（2026-11-01；本篇正文素材落库于 1.0.0 轮，§10 的代码接缝按此快照逐条重核）；本篇随 1.0.0 增量更新轮新增（Memlake 于 2026-10-13 与 v1.0.0 同日发布，素材由 commit `610c135b6` 落库）。
 > **消歧**：本篇分析的是 **Hindsight 官方的企业版存储引擎**（Hindsight Memlake），与同名开源项目 easy12138s/MemLake（团队级 MCP 记忆网关，见竞品分析文档 §3.7）无关。
 > **证据等级声明（先读这段）**：Memlake 引擎是闭源 Rust 程序，**不在开源仓库里**（全仓 grep 26 个命中文件全部是文档与配图，引擎代码零命中）。因此本篇论断分三级标注：`[blog]`=官方发布博客 `hindsight-docs/blog/2026-10-13-memlake.md`（含 11 条脚注）；`[文档]`=`hindsight-docs/docs/cloud-enterprise/`；`[图]`=6 张 Giotto 架构动画的 JSON 元数据与博客 SVG 内嵌文本（`hindsight-docs/figures/memlake-*.json`）；唯一的 `[代码]` 级内容是**开源仓库里的接缝**（memories store 抽象，§10）。博客是厂商叙述：机制描述与营销数字混排，本篇把每个数字的测量条件一并抄录，无法核实的内部实现一律写"未确认"。
 > 研究方法：2 名研究员独立提取 + 2 名交叉审核员逐字回源核验（研究底稿见 `_memlake-research/`）。
@@ -170,7 +170,7 @@ sequenceDiagram
 | 关系（through relationships） | 从最佳向量匹配**一步出边** | 共享实体 / 语义相近 / **caused or were caused by**（因果）/ 时序紧邻（right before or after） |
 | 时间（through time） | 每 segment 一个时间索引 | 带时间窗的查询**只读该范围** |
 
-`[代码]` 对照（开源侧语义一致性）：`memory_links` 表的 check 约束恰好是 `'temporal','semantic','entity','causes','caused_by','enables','prevents'` 七种链接类型（alembic `5a366d414dce_initial_schema.py:471`），与关系路描述吻合；图臂以语义命中为种子（`engine/memories/base.py:796` `GRAPH_SEED_LIMIT = 20`）。
+`[代码]` 对照（开源侧语义一致性）：`memory_links` 表的 check 约束恰好是 `'temporal','semantic','entity','causes','caused_by','enables','prevents'` 七种链接类型（alembic `5a366d414dce_initial_schema.py:471`），与关系路描述吻合；图臂以语义命中为种子（`engine/memories/base.py:800` `GRAPH_SEED_LIMIT = 20`）。
 
 **exact vs approximate 的口径**（这是评估任何 ANN 引擎的关键，官方给了明确边界）：
 
@@ -183,22 +183,27 @@ sequenceDiagram
 
 Memlake 引擎本体不在开源仓库，但"插进 Hindsight 数据库层"的接缝在开源代码里完整可见 `[代码]`：
 
-1. **store 抽象**：`hindsight-api-slim/hindsight_api/engine/memories/base.py:1084` 定义 `MemoriesExtension(Extension, ABC)`（4450 行、195 个方法）；`extensions/loader.py:174` 注册 `MEMORIES` 扩展槽；`engine/memories/__init__.py:49-63` 的工厂 `create_memories()` 先尝试 `load_extension("MEMORIES", ...)`（加载时打日志 `"[memories] store=%s (memory rows do not go to postgres)"`），未配置则回落 `PostgresMemories`。**v1.1.0 起两条路径都被 `time_store_calls(...)` 包一层**（`hindsight_api/operation_runs.py`）：每次 store 调用的次数与耗时记进当前 operation run，计量点就在 store 接口上，所以对任何后端（含网络型）同样有效；store 内部对自身的再调用用 `_in_store` contextvar 去重，只记一次（`memories/__init__.py:52,59,63`）。企业版 Memlake 就是这个槽位的另一个实现（此句为接口契约推论，实现本身未确认）。
-2. **表集合精确对应**：`engine/schema.py:15` 的 `STORE_TABLES = {memory_units, memory_links, unit_entities, documents, chunks, entities, entity_cooccurrences, invalidated_memory_units}`——这就是 blog 所说"记忆所在处"的开源清单；`base.py` 模块 docstring 原文："Banks, operations and the other engine tables stay in Postgres either way"（bank/操作队列等运维表两种存储下都留 Postgres）。
+1. **store 抽象**：`hindsight-api-slim/hindsight_api/engine/memories/base.py:1084` 定义 `MemoriesExtension(Extension, ABC)`（4454 行；`MemoriesExtension` 的直接方法 183 个，连同同文件 `RetainSession`(3)/`WriteBatch`(3)/`EntityResolverHandle`(4)/`FactRecord`(1)/`DeletePredicate`(1)，各类合计 195 个方法，另有 8 个模块级函数）；`extensions/loader.py:174` 注册 `MEMORIES` 扩展槽；`engine/memories/__init__.py:49-63` 的工厂 `create_memories()` 先尝试 `load_extension("MEMORIES", ...)`（加载时打日志 `"[memories] store=%s (memory rows do not go to postgres)"`），未配置则回落 `PostgresMemories`。**v1.1.0 起两条路径都被 `time_store_calls(...)` 包一层**（`hindsight_api/operation_runs.py`）：每次 store 调用的次数与耗时记进当前 operation run，计量点就在 store 接口上，所以对任何后端（含网络型）同样有效；store 内部对自身的再调用用 `_in_store` contextvar 去重，只记一次——`_in_store` 与去重逻辑都在 `hindsight_api/operation_runs.py:62` 与 `:188-195`，`memories/__init__.py:52,59,63` 只是三处包 `time_store_calls(...)` 的包装点。企业版 Memlake 就是这个槽位的另一个实现（此句为接口契约推论，实现本身未确认）。
+2. **表集合精确对应**：`engine/schema.py:16` 的 `STORE_TABLES = {memory_units, memory_links, unit_entities, documents, chunks, entities, entity_cooccurrences, invalidated_memory_units}`——这就是 blog 所说"记忆所在处"的开源清单；`base.py` 模块 docstring 原文："Banks, operations and the other engine tables stay in Postgres either way"（bank/操作队列等运维表两种存储下都留 Postgres）。
 3. **接口已为"网络型 store"备好形状**：
    - `store_owned`（base.py:1139）：store 拥有全部记忆行 + 文档/chunk 本体 + retain 的原子服务端提交（返回 `seq/unit_ids/new_entities`）；`store_owned_for(bank_id)`（:1141）支持**按 bank 路由不同后端**——docstring 明说支持"banks live in different backends"，这正是博客"迁移任务逐组织搬迁"的接缝。
    - `assert_writable`（base.py:1366）+ `StoreWriteUnavailable`（:73-86，映射 503+Retry-After）：docstring 原文即 "migrating a bank between backends holds it for a few seconds"——**bank 在两后端间搬迁时冻结数秒**已代码化；`StoreWriteConflict`（:88）则是**条件写输掉竞争**的异常形状（"the state it was based on moved before it committed……the caller has to re-read and redo the work"）——与 Memlake 的条件写协议同构。（注：这是 OSS 存储契约的事实，不据此推断 Memlake 内部实现。）
-   - `begin_retain` → `RetainSession`（流式收 part）；`allocate_unit_ids`（"rather than by an INSERT's RETURNING clause"发 ID——不再依赖 Postgres）；`FactRecord` 内联携带 `entity_ids` + `causal_edges`（base.py:571 起："what would have become `memory_links` / `unit_entities` rows"）——链接可以不落 SQL 行。
-   - **recall 两级接缝**：`recall_unified`（base.py:1817，一次调用返回四臂结果，"a store that owns its index answers every arm from a single query with no per-arm round-trips"）与 `full_recall`（base.py:1857，store 整包接下融合/重排/新近度/预算——"A store that owns its index can do all of it where the data already is"）。引擎侧 `memory_engine.py:9955` 起是 "Store-answered recall" 分支：记录 store 上报的分阶段耗时与 `store_hop_overhead`（:9979），注释明写 "**our gRPC client**"——网络型 store 的观测位已就绪；v1.1.0 起同一批数据还进 operation run（见下条）。
+   - `begin_retain` → `RetainSession`（流式收 part）；`allocate_unit_ids`（`base.py:1401-1406` 的 docstring："The Postgres path never calls this — its ids come back from the INSERT's RETURNING clause"；即"不再依赖 INSERT 的 RETURNING 发 ID"）；`FactRecord` 内联携带 `entity_ids` + `causal_edges`（base.py:571 起；docstring 原文 `:574-577`："There is no row behind this — it is the *whole* record — so it carries every column recall returns, plus the edges that would otherwise have become `memory_links` and `unit_entities` rows."）——链接可以不落 SQL 行。
+   - **recall 两级接缝**：`recall_unified`（base.py:1817，一次调用返回四臂结果，"a store that owns its index answers every arm from a single query with no per-arm round-trips"）与 `full_recall`（base.py:1857，store 整包接下融合/重排/新近度/预算——"A store that owns its index can do all of it where the data already is"）。引擎侧 `memory_engine.py:10051` 起是 "Store-answered recall" 分支：记录 store 上报的分阶段耗时与 `store_hop_overhead`（:10075），注释明写 "**our gRPC client**"——网络型 store 的观测位已就绪；v1.1.0 起同一批数据还进 operation run（见下条）。
 4. **一个 blog 表述最粗的地方（接口 docstring 甄别）**：blog 笼统说 mental models 与 knowledge pages "move to the bucket"；但接口 docstring（base.py:908 `KnowledgePageEntry`）明确：**页面的行（name/body/folder/trigger/history）仍留 Postgres 且是权威，store 只持有派生的索引副本**（"this is the derived half"）。两者可相容（索引进桶、行留 PG），但"整页搬进桶"是博客的粗化。
-5. **边界执法**：运行时 `fq_table` 拒绝 store 表名（`engine/schema.py:16` 的 `STORE_TABLES`、:35 的 `_guard`）、store 专属 `fq_store_table`；AST 级测试 `tests/test_store_table_boundary.py` 禁止 store 表出现在 store 之外的 SQL 里。v1.1.0（#5993）把 schema 访问器 `get_current_schema` 从 `memory_engine.py` 迁到独立的 `hindsight_api/schema_context.py`——引擎不再反向 import API 层，`schema.py:9` 改为直接 import 它。
+5. **边界执法**：运行时 `fq_table` 拒绝 store 表名（`engine/schema.py:16` 的 `STORE_TABLES`、:34 的 `_guard`）、store 专属 `fq_store_table`；AST 级测试 `tests/test_store_table_boundary.py` 禁止 store 表出现在 store 之外的 SQL 里。v1.1.0（#5993）把 schema 访问器 `get_current_schema` 从 `memory_engine.py` 迁到独立的 `hindsight_api/schema_context.py`——引擎不再反向 import API 层，`schema.py:9` 改为直接 import 它。
 
-6. **v1.1.0 窗口新增/收紧的接口约定**（均按 `b4a0da1e9` 核对）：
-   - **写入锁序成为契约**：`lock_document_row`（base.py:3503）与 `lock_consolidation_write_set`（:3797）。retain、consolidation、delete 三个写者按同一顺序取锁，才不会互相死锁（#5433）；默认实现是 no-op，注释明写"自管并发的 store 用自己的并发模型"——对 Memlake 这类条件写 store，这是"同文档并发写"必须自己保证的不变量。
+6. **v1.1.0 窗口新增/收紧的接口约定**（约定本身按 `b4a0da1e9` 归纳；行号已按本快照 `bc5ea195a` 重取，所以与本篇正文里 `b4a0da1e9` 时期的旧行号可能不同）：
+   - **写入锁序成为契约**：`lock_document_row`（base.py:3503）与 `lock_consolidation_write_set`（:3798）。retain、consolidation、delete 三个写者按同一顺序取锁，才不会互相死锁（#5433）；默认实现是 no-op，注释明写"自管并发的 store 用自己的并发模型"——对 Memlake 这类条件写 store，这是"同文档并发写"必须自己保证的不变量。
    - `memories_updated_between`（:2185）：按时间窗口列出记忆，供 delta knowledge page 刷新用决策模型判断"这批记忆会不会改页"；返回 `None` = 本 store 不支持，刷新退回检索（#5698）。
-   - **导出改分页迭代**：`iter_entity_maintenance_queue`（:4211）与 `iter_archived_memories`（:4224）取代一次性的 `dump_entity_maintenance_queue`（#5737）——大 bank 导出不再把整表读进内存。
+   - **导出改分页迭代**：`iter_entity_maintenance_queue`（:4215）与 `iter_archived_memories`（:4228）取代一次性的 `dump_entity_maintenance_queue`（#5737）——大 bank 导出不再把整表读进内存。
    - `ensure_bank_storage`（:1393）的契约改写为"**必须能在 bank 行存在之前调用**"（创建与导入都先建存储），创建失败留下的孤儿存储由下一次调用接管（#5763）。
    - `GRAPH_MAX_EDGES = 10_000`（:807）：每个方向的图视图答案最多 1 万条边。不设界时几千条 observation 能派生几十万条边，在事件循环里算数秒、回出几 MB JSON（#5703）。
+7. **本窗口（`bc5ea195a`）在接缝上只动了三个方法的形状，没有新增抽象方法**——`MemoriesExtension` 的直接方法仍是 183 个（各类合计 195 个）、`STORE_TABLES` 仍是那 8 张表、没有新槽位，所以 Memlake 这类外置 store 的实现面**不需要跟着扩**。三处改动里两处在 `MemoriesExtension`、一处在 `EntityResolverHandle` 协议：
+   - `flush_pending_stats(conn: Any | None = None)`（`base.py:1072` 的 `EntityResolverHandle` 协议、`memories/pg/entity_resolver.py:525`）：编辑记忆时把新 postings 的 `mention_count` 计入**调用方的事务**，否则等锁的第二个编辑会先把 postings 释放、计数被 floor 到 0，随后这次 flush 再加 1 → 永久多 1（#6233／注释 #6229）。对 store-owned 的 bank，这段默认是 no-op（实体统计在 store 自己那边），但**协议签名变了**：一个自己维护实体计数的 store 若照旧在事务外 flush，就会复现同一个 off-by-one。
+   - `expand_memories` 的返回多了三个日期列（`base.py:4070-4092`）：`occurred_start` / `occurred_end` / `mentioned_at`。动机是 reflect 的每条证据都要带日期（#6236），而 `expand` 工具是唯一拿不到日期的取证路径；Postgres 侧只是 SELECT 多三列（`memories/pg/expand.py:14-25`），但 **store-owned 的实现必须自己补上这三项**，否则 reflect 在该 store 上会退化成"证据没有时间"。
+   - `unit_embeddings` 多了一个**消费方**：recall 的决策去重（本窗口新增，`_candidate_embeddings`，`memory_engine.py:9782-9805`）用它取候选的存量向量，只对"可能重复的对"提问；store 返回空/读取失败时退化为"对每一对都问"（`base.py:3700-3706` 的契约补了这句）。默认仍返回空列表，行为不变——但这是"默认实现为什么必须返回空、且不能报错"的新理由：空在这里是**合法降级**，不是漏实现。
+   仍然成立的两条边界：`STORE_TABLES` 的 8 张表一字未改（`engine/schema.py:16`），`tests/test_store_table_boundary.py` 也一字未改；`memories/base.py` 各类合计的 195 个方法里，本窗口没有任何一个被删除或改名（新旧方法名集合 `diff` 为空）。**结论限定在 `MemoriesExtension` 的实现方**：`EntityResolverHandle` 的签名变了对"自己实现实体统计"的 store 有影响（见上一条）。
 
 ## 11. 性能与成本台账（每个数字都带测量条件）
 
@@ -275,6 +280,7 @@ Memlake 引擎本体不在开源仓库，但"插进 Hindsight 数据库层"的�
 5. `wal/`、`seg-` 命名是否线上真实对象键（图为示意）。
 6. 白皮书与 docs.hindsight.vectorize.io/enterprise/memlake 四个页面的内容（仓库外未读）。
 7. 全部性能/成本数字的独立复测（本系列无该环境）。
+8. **Memlake 对开源 store 接缝的跟随程度**：§10 已按 `bc5ea195a` 逐条重核（`STORE_TABLES` 8 张、`MemoriesExtension` 直接方法 183、无新增槽位），但本窗口变的三个方法形状——`flush_pending_stats(conn=...)`、`expand_memories` 多返回三个日期、recall 去重开始消费 `unit_embeddings`——Memlake 是否已实现、或是否走 `recall_unified`/`full_recall` 整包路径从而根本不经过它们，闭源无法确认。
 
 ## 15. 可用性四形态与迁移 `[blog §Availability]`
 
